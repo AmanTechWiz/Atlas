@@ -34,7 +34,15 @@ INGEST_SCRIPT = PROJECT_ROOT / "vector_store" / "ingest.py"
 PERSIST_DIR = PROJECT_ROOT / "chroma_db"
 LOGS_DIR = PROJECT_ROOT / "logs"
 
-STUB_ENABLED = True
+STUB_ENABLED = False
+
+try:
+    from graph.workflow import run_query
+except Exception as _e:  # pragma: no cover
+    run_query = None
+    _IMPORT_ERROR = repr(_e)
+else:
+    _IMPORT_ERROR = None
 
 SAMPLE_QUERIES = [
     "What is the parental leave policy and how does it interact with the onboarding timeline for new parents in their first 30 days?",
@@ -295,13 +303,14 @@ def render_main() -> None:
         "The answer is grounded in the source corpus and verified before being shown."
     )
 
-    if STUB_ENABLED:
-        st.warning(
-            "UI shell is wired to **stubbed data** (STUB_ENABLED=True). "
-            "The real US 1 backend (Retriever + Analyst + Orchestrator + LangGraph) "
-            "will replace the stub in the next step. Click 'Run a sample query' below "
-            "to preview the full UX."
-        )
+    if STUB_ENABLED or _IMPORT_ERROR:
+        msg = "UI shell is wired to **stubbed data**"
+        if STUB_ENABLED:
+            msg += " (STUB_ENABLED=True)"
+        if _IMPORT_ERROR:
+            msg += f" — backend import failed: `{_IMPORT_ERROR}`"
+        msg += ". The real US 1 backend will replace the stub in a future step."
+        st.warning(msg)
 
     st.markdown("### Try a sample query")
     cols = st.columns(len(SAMPLE_QUERIES))
@@ -324,8 +333,11 @@ def render_main() -> None:
 
     if ask and st.session_state.query_input.strip():
         query = st.session_state.query_input
-        with st.spinner("Running agent pipeline..."):
-            result = stub_run_query(query)
+        with st.spinner("Running agent pipeline (orchestrate → retrieve → analyze → finalize)..."):
+            if STUB_ENABLED or run_query is None:
+                result = stub_run_query(query)
+            else:
+                result = run_query(query)
         st.session_state.last_result = result
         st.session_state.messages.append({"role": "user", "content": query})
         st.session_state.session_history.append(
