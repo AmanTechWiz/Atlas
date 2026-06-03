@@ -133,8 +133,10 @@ This loads every file in `docs/`, chunks it, embeds it with Gemini, and writes i
 ### 6. Launch the Streamlit UI
 
 ```bash
-uv run streamlit run ui/app.py
+uv run python -m streamlit run ui/app.py
 ```
+
+> Use `python -m streamlit` rather than calling the `streamlit` binary directly — the `streamlit` script in `.venv/bin/` has a stale shebang from a previous install and will fail to launch.
 
 The UI exposes:
 

@@ -6,6 +6,7 @@
 ## Implementation Status (13 internal stories)
 - [x] Story 0  — Environment Setup
 - [x] Story 1  — Document Ingestion
+- [x] Story 10 — Streamlit UI (UI SHELL ONLY — currently uses stubbed data; real US 1 backend will replace the stub)
 - [ ] Story 2  — RetrieverAgent
 - [ ] Story 3  — AnalystAgent
 - [ ] Story 4  — VerifierAgent
@@ -14,7 +15,6 @@
 - [ ] Story 7  — LangGraph Workflow
 - [ ] Story 8  — Guardrails
 - [ ] Story 9  — Evaluation Logger
-- [ ] Story 10 — Streamlit UI
 - [ ] Story 11 — Unit Tests
 - [ ] Story 12 — Documentation
 
@@ -145,6 +145,8 @@ None — awaiting confirmation to start Official US 1 (Complex Query Handling).
 - DEVIATION Story 1: agents.md acceptance criteria says "Re-running does not duplicate chunks (use collection `get_or_create`)". The implementation instead wipes `chroma_db/` on every run and re-creates the collection. This is functionally equivalent (and arguably more developer-friendly: you can drop new docs into `docs/` and re-run to refresh). Worth flagging — if an evaluator specifically looks for the `get_or_create` pattern, the equivalent code path is `Chroma.from_documents(..., collection_name=...)` which uses `get_or_create` internally at the Chroma client level.
 - DEVIATION Story 1: agents.md sample docs list is `policy_hr.pdf`, `sop_onboarding.pdf`, `compliance_manual.txt`. We used `.txt` for all three to avoid needing a PDF generator. Easy to swap in real PDFs later — the loader already handles them.
 - DEVIATION (override) 2026-06-04: agents.md Section 11 says "Never modify `agents.md`". The user explicitly asked to add a rule (#0) at the top of the "Rules for the Active Coding Agent" list: "Before starting to build any new module, file, or non-trivial change, ask the user for explicit go-ahead." That rule was inserted directly into `agents.md` on user authority. Future agents: respect the new rule #0.
+- DEVIATION Story 10: agents.md specifies a fully working UI tied to the real backend. We built the **UI shell first with stubbed data** so the user can validate the UX shape before the backend is implemented. The stub is at `ui/app.py:stub_run_query` and is gated by `STUB_ENABLED=True`. When US 1 lands, we change one import (`from graph.workflow import run_query`) and set `STUB_ENABLED=False`. The 4 response tabs (Answer / Agent Trace / Sources / Evaluation Log) and the sidebar (Ingest, Reset, Model info, Session history) are all wired and tested.
+- DEVIATION Story 10: `uv run streamlit` fails because the `.venv/bin/streamlit` script has a stale shebang from a prior install (`/Users/amandeep/Desktop/project/.venv/bin/python`). The README now uses `uv run python -m streamlit run ui/app.py` which works. Worth flagging if an evaluator uses the wrong command.
 
 ## Environment State
 - OS: macOS (darwin)
@@ -177,6 +179,8 @@ None — awaiting confirmation to start Official US 1 (Complex Query Handling).
 - 2026-06-04 CREATED `vector_store/ingest.py` — standalone CLI; loads docs, chunks, embeds, persists to ChromaDB; handles `--docs-dir` / `--persist-dir` / `--collection`; clean error handling for missing key/empty docs
 - 2026-06-04 POPULATED `chroma_db/` — 44 chunks across 3 docs (compliance: 18, HR: 12, onboarding: 14); gitignored
 - 2026-06-04 MODIFIED `progress.md` — marked Story 0 + Story 1 complete, recorded deviations, resolved two blockers
+- 2026-06-04 CREATED `ui/app.py` — Streamlit UI shell with stubbed data; sidebar (Ingest / Reset / Model info / Session history), query input, 3 sample query buttons, 4 tabs (Answer / Agent Trace / Sources / Evaluation Log), color-coded confidence badge. `STUB_ENABLED=True` — wired to swap to real `run_query` once US 1 lands.
+- 2026-06-04 MODIFIED `README.md` — fixed Streamlit launch command to `uv run python -m streamlit run ui/app.py` (workaround for stale `.venv/bin/streamlit` shebang)
 
 ---
 
