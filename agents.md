@@ -607,6 +607,13 @@ or breaking existing functionality.
 
 ### Rules for the Active Coding Agent
 
+0. **Before starting to build any new module, file, or non-trivial change, ask
+   the user for explicit go-ahead.** Use the standard prompt:
+   *"Should I start building `<name of thing>`?"* Wait for a clear yes/no
+   before writing any code. This applies to every new file, every new agent,
+   every new tab in the UI, every refactor, and every push to a new branch.
+   (User-added rule, 2026-06-04.)
+
 1. **Update `progress.md` after completing every User Story** — not at the end
    of the session, after each story.
 
