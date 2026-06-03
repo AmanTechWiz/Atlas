@@ -13,6 +13,26 @@ the user stories in order. Each user story maps directly to the evaluation rubri
 
 ---
 
+## 0.5. How an Incoming Agent Should Start
+
+If you are a coding agent picking up this project, do the following before
+writing a single line of code:
+
+1. Read `agents.md` fully — understand the full plan and tech stack.
+2. Read `progress.md` fully — understand exactly what's done and what isn't.
+3. Check the "Currently In Progress" section — start from that exact step.
+4. Check "Deviations" — the actual code may differ from `agents.md` in places.
+5. Check "Blockers" — do not retry a blocked approach without reading why it failed.
+6. Verify the environment state matches what's documented.
+7. Only then start writing code.
+
+**Handoff protocol reminder:** When you complete an official US (Section 12),
+end your message with the literal line `US(x) completed` and **do not** update
+`progress.md` until the user replies with `ok let's move to next us` (or close).
+See rule #0a in Section 11 for full details.
+
+---
+
 ## 1. Project Summary (Plain English)
 
 Build a **local-first, multi-agent AI system** that answers complex business
@@ -614,6 +634,19 @@ or breaking existing functionality.
    every new tab in the UI, every refactor, and every push to a new branch.
    (User-added rule, 2026-06-04.)
 
+0a. **Handoff protocol for official US completion.** When you complete one of
+   the **6 official Cognizant user stories** (Section 12), do the following:
+   - At the very end of your completion message, write the literal line
+     `US(x) completed` where `x` is the official US number.
+   - **Do NOT update `progress.md` yet.** Wait for the user to reply with
+     the literal phrase `ok let's move to next us` (or close to it).
+   - On that reply: first update `progress.md` (checkboxes, summary, file
+     log, deviations, environment state), commit, push; then ask the user
+     which official US to build next.
+   - This rule is more specific than rule #1 — it says the user explicitly
+   acknowledges the US is done before `progress.md` is touched. (User-added
+   rule, 2026-06-04.)
+
 1. **Update `progress.md` after completing every User Story** — not at the end
    of the session, after each story.
 
@@ -692,18 +725,8 @@ Format: DEVIATION [story N]: [what agents.md says] → [what was actually done] 
 - [timestamp] MODIFIED requirements.txt — added chromadb==0.5.0
 ```
 
-### How an Incoming Agent Should Start
-
-If you are a coding agent picking up this project, do the following before
-writing a single line of code:
-
-1. Read `agents.md` fully — understand the full plan and tech stack.
-2. Read `progress.md` fully — understand exactly what's done and what isn't.
-3. Check the "Currently In Progress" section — start from that exact step.
-4. Check "Deviations" — the actual code may differ from `agents.md` in places.
-5. Check "Blockers" — do not retry a blocked approach without reading why it failed.
-6. Verify the environment state matches what's documented.
-7. Only then start writing code.
+(See Section 0.5 at the top of this file for the full "How an Incoming Agent
+Should Start" checklist.)
 
 ---
 
