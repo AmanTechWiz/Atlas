@@ -241,6 +241,7 @@ def init_session_state() -> None:
         "session_history": [],
         "ingested": PERSIST_DIR.exists(),
         "ingest_status": "",
+        "query_input": "",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -310,18 +311,19 @@ def render_main() -> None:
             key=f"sample_{sample[:10]}",
             use_container_width=True,
         ):
-            st.session_state["pending_query"] = sample
+            st.session_state.query_input = sample
 
     st.markdown("### Ask your own question")
-    query = st.text_input(
+    st.text_input(
         "Your query:",
-        value=st.session_state.pop("pending_query", ""),
+        key="query_input",
         placeholder="e.g., What is the parental leave policy?",
         label_visibility="collapsed",
     )
     ask = st.button("Ask", type="primary", use_container_width=False)
 
-    if ask and query.strip():
+    if ask and st.session_state.query_input.strip():
+        query = st.session_state.query_input
         with st.spinner("Running agent pipeline..."):
             result = stub_run_query(query)
         st.session_state.last_result = result
@@ -334,6 +336,7 @@ def render_main() -> None:
                 "timestamp": datetime.now().strftime("%H:%M:%S"),
             }
         )
+        st.session_state.query_input = ""
 
     if st.session_state.last_result:
         st.markdown("---")

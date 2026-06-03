@@ -1,13 +1,22 @@
 """Document ingestion into ChromaDB.
 
 Loads every supported file (PDF, .txt, .md) from the docs/ directory,
-chunks them, embeds with Gemini, and writes them to a persistent
-ChromaDB collection. Re-running clears and re-populates the collection
-so we never end up with duplicate chunks.
+chunks them, embeds them, and writes them to a persistent ChromaDB
+collection. Supports two embedding backends, switched via
+EMBEDDING_BACKEND in .env:
+
+  - ollama   (default) — local, uses Ollama + nomic-embed-text
+  - gemini             — Google Gemini embedding API
+
+Re-running builds a NEW collection in a temp directory first, verifies
+it has the expected number of chunks, and only then swaps it into
+place. If the embed step fails for any reason, the existing database
+is left untouched (no more wipe-then-fail data loss).
 
 Run as a script:
     python vector_store/ingest.py
     python vector_store/ingest.py --docs-dir my_docs --persist-dir my_db
+    python vector_store/ingest.py --embedding-backend gemini
 """
 
 from __future__ import annotations
@@ -28,12 +37,18 @@ warnings.filterwarnings(
 )
 warnings.filterwarnings(
     "ignore",
-    message=".*manual persistence method is no longer supported.*",
+    message=".*The class `Chroma` was deprecated.*",
+    category=DeprecationWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=".*The class `OllamaEmbeddings` was deprecated.*",
     category=DeprecationWarning,
 )
 
 from dotenv import load_dotenv
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
+from langchain_community.embeddings import OllamaEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
@@ -50,6 +65,8 @@ log = logging.getLogger("ingest")
 DEFAULT_DOCS_DIR = "docs"
 DEFAULT_PERSIST_DIR = "chroma_db"
 DEFAULT_COLLECTION = "enterprise_docs"
+DEFAULT_OLLAMA_MODEL = "nomic-embed-text"
+DEFAULT_OLLAMA_URL = "http://localhost:11434"
 
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 50
@@ -115,49 +132,92 @@ def split_documents(docs: List[Document]) -> List[Document]:
     return chunks
 
 
-def _get_embeddings() -> GoogleGenerativeAIEmbeddings:
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key or api_key == "your_gemini_api_key_here":
-        raise EnvironmentError(
-            "GEMINI_API_KEY is missing or unset. "
-            "Copy .env.example to .env and set a real key."
+def _get_embeddings(backend: str):
+    if backend == "ollama":
+        model = os.getenv("OLLAMA_EMBED_MODEL", DEFAULT_OLLAMA_MODEL)
+        base_url = os.getenv("OLLAMA_BASE_URL", DEFAULT_OLLAMA_URL)
+        log.info("Embedding backend: ollama (model=%s, base_url=%s)", model, base_url)
+        return OllamaEmbeddings(model=model, base_url=base_url)
+
+    if backend == "gemini":
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key or api_key == "your_gemini_api_key_here":
+            raise EnvironmentError(
+                "GEMINI_API_KEY is missing or unset. "
+                "Copy .env.example to .env and set a real key, "
+                "or set EMBEDDING_BACKEND=ollama to use local embeddings."
+            )
+        model = os.getenv("GEMINI_EMBEDDING_MODEL", "models/gemini-embedding-001")
+        log.info("Embedding backend: gemini (model=%s)", model)
+        return GoogleGenerativeAIEmbeddings(model=model, google_api_key=api_key)
+
+    raise ValueError(
+        f"Unknown EMBEDDING_BACKEND={backend!r}. Use 'ollama' or 'gemini'."
+    )
+
+
+def _count_in_dir(persist_dir: Path, embeddings, collection_name: str) -> int:
+    try:
+        vs = Chroma(
+            persist_directory=str(persist_dir),
+            embedding_function=embeddings,
+            collection_name=collection_name,
         )
-    model = os.getenv("GEMINI_EMBEDDING_MODEL", "models/text-embedding-004")
-    return GoogleGenerativeAIEmbeddings(model=model, google_api_key=api_key)
+        return vs._collection.count()
+    except Exception:
+        return 0
 
 
-def reset_persistent_dir(persist_dir: Path) -> None:
-    if persist_dir.exists():
-        log.info("Clearing existing ChromaDB at %s", persist_dir)
-        shutil.rmtree(persist_dir)
-    persist_dir.mkdir(parents=True, exist_ok=True)
-
-
-def ingest(docs_dir: Path, persist_dir: Path, collection_name: str) -> int:
-    log.info("Loading documents from %s", docs_dir)
+def safe_ingest(
+    docs_dir: Path,
+    persist_dir: Path,
+    collection_name: str,
+    backend: str,
+) -> int:
     docs = load_documents(docs_dir)
     chunks = split_documents(docs)
-
     if not chunks:
         log.warning("No chunks to ingest.")
         return 0
 
-    embeddings = _get_embeddings()
-    log.info("Embedding and writing to %s (collection=%s)",
-             persist_dir, collection_name)
+    embeddings = _get_embeddings(backend)
 
-    vectorstore = Chroma.from_documents(
-        documents=chunks,
-        embedding=embeddings,
-        persist_directory=str(persist_dir),
-        collection_name=collection_name,
-    )
+    temp_dir = persist_dir.parent / f"{persist_dir.name}_new"
+    if temp_dir.exists():
+        shutil.rmtree(temp_dir)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+
+    log.info("Building new collection in %s ...", temp_dir)
+    try:
+        vectorstore = Chroma.from_documents(
+            documents=chunks,
+            embedding=embeddings,
+            persist_directory=str(temp_dir),
+            collection_name=collection_name,
+        )
+    except Exception:
+        log.exception("Ingest failed during embedding. Existing data preserved.")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+
+    actual = _count_in_dir(temp_dir, embeddings, collection_name)
+    expected = len(chunks)
+    if actual < expected:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise RuntimeError(
+            f"Ingest produced {actual}/{expected} chunks — aborting, "
+            f"existing data at {persist_dir} preserved."
+        )
+
+    if persist_dir.exists():
+        shutil.rmtree(persist_dir)
+    temp_dir.rename(persist_dir)
+    log.info("Swapped %s into place.", persist_dir)
 
     counts: dict[str, int] = {}
     for c in chunks:
         src = c.metadata.get("source", "unknown")
         counts[src] = counts.get(src, 0) + 1
-
     log.info(
         "Ingestion complete: %d total chunk(s) across %d source file(s).",
         len(chunks), len(counts),
@@ -178,6 +238,12 @@ def parse_args() -> argparse.Namespace:
                    help=f"ChromaDB persistence path (default: {DEFAULT_PERSIST_DIR})")
     p.add_argument("--collection", default=DEFAULT_COLLECTION,
                    help=f"ChromaDB collection name (default: {DEFAULT_COLLECTION})")
+    p.add_argument(
+        "--embedding-backend",
+        choices=["ollama", "gemini"],
+        default=os.getenv("EMBEDDING_BACKEND", "ollama"),
+        help="embedding backend (default: ollama, or env EMBEDDING_BACKEND)",
+    )
     return p.parse_args()
 
 
@@ -187,14 +253,16 @@ def main() -> int:
     docs_dir = Path(args.docs_dir)
     persist_dir = Path(args.persist_dir)
     try:
-        reset_persistent_dir(persist_dir)
-        n = ingest(docs_dir, persist_dir, args.collection)
+        n = safe_ingest(docs_dir, persist_dir, args.collection, args.embedding_backend)
     except FileNotFoundError as e:
         log.error("%s", e)
         return 2
     except EnvironmentError as e:
         log.error("%s", e)
         return 3
+    except RuntimeError as e:
+        log.error("%s", e)
+        return 4
     except Exception:
         log.exception("Ingestion failed.")
         return 1
