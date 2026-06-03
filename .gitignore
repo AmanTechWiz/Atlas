@@ -1,0 +1,29 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Environment variables (NEVER commit)
+.env
+.env.local
+
+# ChromaDB persistent storage
+chroma_db/
+chroma/
+
+# Logs (generated at runtime, but keep folder tracked via .gitkeep)
+logs/*.json
+!logs/.gitkeep
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
