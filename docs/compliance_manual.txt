@@ -1,0 +1,162 @@
+ACME CORPORATION — DATA SECURITY AND COMPLIANCE MANUAL
+Document ID: CMP-SEC-202
+Version: 5.1
+Effective Date: 2026-03-01
+Owner: Information Security Office
+Audience: All employees, contractors, and third parties with access to
+          ACME systems or data.
+
+================================================================================
+1. SCOPE AND PURPOSE
+================================================================================
+
+This manual defines ACME Corporation's data security and compliance
+requirements. It applies to all information classified as Confidential,
+Internal, or Public that is created, stored, processed, or transmitted
+on company systems, as well as to any personal devices used for work.
+
+ACME is subject to the following regulatory regimes:
+- GDPR (EU/UK data protection)
+- CCPA (California Consumer Privacy Act)
+- SOC 2 Type II (annual audit)
+- HIPAA (for protected health information in our Health division)
+- ISO/IEC 27001:2022
+
+================================================================================
+2. DATA CLASSIFICATION
+================================================================================
+
+2.1 PUBLIC
+Information explicitly approved for external distribution (e.g.,
+marketing materials, published research). No special handling required.
+
+2.2 INTERNAL
+Default classification for most business information. Sharing outside
+the company requires manager approval.
+
+2.3 CONFIDENTIAL
+Includes customer data, financial records, source code, security
+architecture, employee personnel files, and any data covered by
+GDPR / CCPA / HIPAA. Requires strict need-to-know access, encryption
+at rest and in transit, and an audit trail of all access.
+
+2.4 RESTRICTED
+A subset of Confidential reserved for the most sensitive information
+(e.g., production secrets, board materials, M&A documents). Access
+requires explicit CIO or CEO approval and is logged at the keystroke
+level.
+
+================================================================================
+3. ACCESS CONTROL
+================================================================================
+
+3.1 LEAST PRIVILEGE
+Access to systems and data is granted on a least-privilege basis.
+Employees receive the minimum access required to perform their job
+function.
+
+3.2 MULTI-FACTOR AUTHENTICATION
+Multi-factor authentication is mandatory for:
+- All production system access
+- All cloud admin consoles
+- All VPN connections
+- All email accounts
+
+3.3 ACCESS REVIEWS
+Managers review direct-report access quarterly. Terminated employee
+access is revoked within 4 hours of termination, automated where
+possible via the HRIS-to-IdP integration.
+
+================================================================================
+4. ENCRYPTION STANDARDS
+================================================================================
+
+4.1 DATA IN TRANSIT
+TLS 1.2 or higher is required for all network communications. Plaintext
+protocols (HTTP, FTP, Telnet) are prohibited on production networks.
+
+4.2 DATA AT REST
+- Production databases: AES-256 with customer-managed keys (CMK)
+- Laptops: full-disk encryption mandatory (FileVault on macOS,
+  BitLocker on Windows)
+- Backups: AES-256 with keys stored separately from the data
+- Removable media (USB drives) used for Confidential data must be
+  hardware-encrypted (e.g., Apricorn or similar FIPS 140-2 Level 3
+  devices)
+
+================================================================================
+5. INCIDENT RESPONSE
+================================================================================
+
+5.1 REPORTING
+Any suspected security incident, including phishing, unauthorized
+access, lost devices, or anomalous system behavior, must be reported
+to security@acmecorp.example within 1 hour of discovery.
+
+5.2 SEVERITY LEVELS
+- SEV-1 (Critical): confirmed breach, data exfiltration, or
+  production outage affecting >10% of users
+- SEV-2 (High): attempted breach, malware on a single device
+- SEV-3 (Medium): policy violation, misconfiguration
+- SEV-4 (Low): informational, near-miss
+
+5.3 TIMELINES
+- SEV-1: 15-minute initial response, hourly status updates
+- SEV-2: 1-hour initial response, daily status updates
+- SEV-3/4: next business day
+
+5.4 BREACH NOTIFICATION
+Confirmed breaches involving personal data trigger GDPR Article 33
+notification to the supervisory authority within 72 hours. Affected
+individuals are notified without undue delay where there is a high
+risk to their rights.
+
+================================================================================
+6. VENDOR AND THIRD-PARTY MANAGEMENT
+================================================================================
+
+All third parties that process Confidential or Restricted data on
+behalf of ACME must:
+- Sign a Data Processing Agreement (DPA)
+- Complete a security questionnaire annually
+- Provide evidence of SOC 2 Type II or ISO 27001 certification
+- Allow ACME to audit their controls on request
+
+================================================================================
+7. ACCEPTABLE USE
+================================================================================
+
+7.1 PERSONAL USE
+Incidental personal use of company systems is permitted but must not
+interfere with work, consume excessive resources, or violate any
+other policy.
+
+7.2 PROHIBITED ACTIVITIES
+- Storing personal Confidential data on company systems
+- Sharing account credentials
+- Installing unapproved software on production systems
+- Connecting unauthorized storage devices to production systems
+- Bypassing security controls (e.g., disabling endpoint protection)
+
+7.3 MONITORING
+ACME reserves the right to monitor activity on company systems.
+Employees should have no expectation of privacy when using company
+equipment or networks.
+
+================================================================================
+8. TRAINING AND AWARENESS
+================================================================================
+
+All employees complete annual security awareness training. New
+hires complete it within 14 days of start date. Failure to complete
+training within 30 days of assignment results in account suspension
+until training is complete.
+
+================================================================================
+9. CONTACT
+================================================================================
+
+Information Security Office: security@acmecorp.example
+Compliance Officer: compliance@acmecorp.example
+Privacy Office (DPO): privacy@acmecorp.example
+24/7 Incident Hotline: 1-800-555-0117

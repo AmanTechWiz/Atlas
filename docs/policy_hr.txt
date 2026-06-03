@@ -1,0 +1,100 @@
+ACME CORPORATION — HUMAN RESOURCES POLICY HANDBOOK
+Document ID: HR-POL-001
+Version: 4.2
+Effective Date: 2026-01-15
+Owner: People Operations
+
+================================================================================
+SECTION 1: WORK HOURS AND FLEXIBILITY
+================================================================================
+
+1.1 STANDARD WORK WEEK
+All full-time employees are expected to work a standard 40-hour work week,
+typically scheduled as 8 hours per day, Monday through Friday.
+
+1.2 FLEXIBLE WORK ARRANGEMENTS
+Eligible employees may request flexible work arrangements including:
+- Remote work (up to 3 days per week with manager approval)
+- Compressed work weeks (e.g., four 10-hour days)
+- Flexible start and end times within core hours of 10:00 AM to 3:00 PM
+Requests must be submitted through the HR portal at least 14 days in advance.
+
+1.3 OVERTIME
+Non-exempt employees who work more than 40 hours in a work week will receive
+overtime pay at 1.5x their regular hourly rate. All overtime must be
+pre-approved by the direct manager.
+
+================================================================================
+SECTION 2: LEAVE POLICIES
+================================================================================
+
+2.1 PAID TIME OFF (PTO)
+Full-time employees accrue 20 days of PTO per calendar year, accrued at
+1.67 days per month. Unused PTO carries over up to a maximum of 10 days
+into the next calendar year.
+
+2.2 SICK LEAVE
+Employees receive 10 days of paid sick leave per year, available from day one.
+Sick leave does not carry over to the next calendar year.
+
+2.3 PARENTAL LEAVE
+Primary caregivers are entitled to 16 weeks of paid parental leave.
+Secondary caregivers are entitled to 8 weeks of paid parental leave.
+Parental leave must be taken within the first 12 months of the child's birth
+or adoption.
+
+2.4 BEREAVEMENT LEAVE
+Employees may take up to 5 paid days off for the death of an immediate
+family member, and up to 2 days for extended family.
+
+================================================================================
+SECTION 3: CODE OF CONDUCT
+================================================================================
+
+3.1 PROFESSIONAL BEHAVIOR
+All employees are expected to conduct themselves professionally and treat
+colleagues, clients, and partners with respect. Harassment, discrimination,
+and retaliation of any kind are strictly prohibited and grounds for
+immediate termination.
+
+3.2 CONFLICTS OF INTEREST
+Employees must disclose any actual or potential conflicts of interest to
+their manager and the Compliance team. Examples include outside employment,
+financial interests in vendors, and personal relationships within reporting
+lines.
+
+3.3 REPORTING VIOLATIONS
+Suspected violations of this policy should be reported to HR, to the
+Ethics Hotline at 1-800-555-0199, or anonymously through the online
+EthicsPoint portal at https://ethics.acmecorp.example.
+
+================================================================================
+SECTION 4: COMPENSATION REVIEW
+================================================================================
+
+4.1 ANNUAL REVIEW CYCLE
+Compensation reviews occur each March. Employees receive written feedback
+on their performance and any adjustments to base pay, bonus, or equity.
+
+4.2 PROMOTIONS
+Promotions are considered during the annual review cycle and at other
+times when business needs require. A promotion typically includes a
+minimum 8% increase to base pay.
+
+================================================================================
+SECTION 5: TERMINATION
+================================================================================
+
+5.1 VOLUNTARY TERMINATION
+Employees who choose to resign are asked to provide at least 2 weeks of
+written notice. Final paychecks are issued on the next regular pay date.
+
+5.2 INVOLUNTARY TERMINATION
+Termination for cause (gross misconduct, theft, fraud) results in
+immediate separation without notice. Termination for performance or
+redundancy follows a documented performance management process with
+at least 30 days notice where possible.
+
+5.3 EXIT INTERVIEW
+All departing employees are asked to participate in a confidential exit
+interview with HR.

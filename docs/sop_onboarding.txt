@@ -1,0 +1,127 @@
+ACME CORPORATION — EMPLOYEE ONBOARDING STANDARD OPERATING PROCEDURE
+Document ID: SOP-ONB-014
+Version: 3.0
+Effective Date: 2026-02-01
+Owner: People Operations
+Audience: People Operations, Hiring Managers, IT, Facilities
+
+================================================================================
+1. PURPOSE
+================================================================================
+
+This SOP defines the standardized process for onboarding new employees at
+ACME Corporation. The goal is to ensure every new hire is productive,
+connected, and compliant with company policy by the end of their first
+30 days.
+
+================================================================================
+2. SCOPE
+================================================================================
+
+Applies to all full-time, part-time, and contract employees of ACME
+Corporation, regardless of location or department.
+
+================================================================================
+3. PRE-START (DAYS -7 TO -1)
+================================================================================
+
+3.1 OFFER AND BACKGROUND CHECK
+- Hiring manager extends verbal offer
+- People Ops issues written offer letter via DocuSign
+- Background check and reference checks are initiated (target: complete
+  within 5 business days)
+
+3.2 IT AND ACCESS PROVISIONING
+Once the offer is accepted, IT provisions:
+- Corporate laptop (Windows 11 or macOS, per user preference)
+- Active Directory account and SSO credentials
+- Email address in the @acmecorp.example domain
+- VPN access for remote work
+- Default access to Slack, Google Workspace, and the company intranet
+
+Target completion: 2 business days before start date.
+
+3.3 WORKSPACE AND EQUIPMENT
+Facilities prepares a desk, monitor, keyboard, and mouse. For fully
+remote employees, a home-office equipment stipend of up to $1,000 USD
+is available.
+
+================================================================================
+4. DAY 1
+================================================================================
+
+4.1 WELCOME SESSION (09:00 - 10:30)
+A People Ops coordinator greets the new hire, reviews the day's agenda,
+and walks them through the benefits enrollment, direct deposit, and
+emergency contact forms.
+
+4.2 IT SETUP AND ORIENTATION (10:30 - 12:00)
+IT walks the new hire through laptop setup, VPN, password managers,
+and the standard tool stack. Multi-factor authentication is mandatory
+and must be configured on day 1.
+
+4.3 TEAM INTRODUCTION LUNCH (12:00 - 13:30)
+Hiring manager takes the new hire to lunch with their immediate team.
+
+4.4 COMPLIANCE TRAINING ASSIGNMENT (13:30 - 14:30)
+New hire is enrolled in the mandatory compliance courses on the
+learning management system (LMS):
+- Information Security Awareness (1 hour)
+- Code of Conduct (45 minutes)
+- Anti-Harassment Training (1 hour)
+- Data Privacy and GDPR basics (1 hour)
+All four must be completed within the first 14 days.
+
+================================================================================
+5. WEEK 1
+================================================================================
+
+5.1 ROLE-SPECIFIC TRAINING
+Hiring manager runs role-specific training sessions covering tools,
+processes, and key contacts.
+
+5.2 BUDDY ASSIGNMENT
+Each new hire is paired with a "buddy" — a peer outside their direct
+reporting line — for informal questions and cultural onboarding.
+
+5.3 1-ON-1S
+Hiring manager holds a 30-minute 1:1 every day for the first week to
+check in on questions, blockers, and overall experience.
+
+================================================================================
+6. DAYS 8 - 30
+================================================================================
+
+6.1 WEEKLY 1:1S
+After week 1, the cadence moves to weekly 30-minute 1:1s with the
+hiring manager.
+
+6.2 FIRST PROJECT
+By the end of week 2, the new hire should be assigned a first
+discrete project with clear success criteria and a target completion
+date within the 30-day window.
+
+6.3 30-DAY CHECK-IN
+A formal 30-day check-in is held with the new hire, their manager,
+and a People Ops representative. Feedback is captured in the HRIS.
+
+================================================================================
+7. RESPONSIBILITIES
+================================================================================
+
+ROLE                | RESPONSIBILITY
+--------------------|----------------------------------------------
+Hiring Manager      | Owns the onboarding plan; runs 1:1s
+People Operations   | Coordinates logistics, paperwork, training
+IT                  | Provisions hardware and access on time
+Facilities          | Prepares physical workspace
+Buddy               | Provides informal peer support
+New Hire            | Completes required training on time
+
+================================================================================
+8. ESCALATION
+================================================================================
+
+Any blocker in onboarding should be escalated to the People Operations
+lead within 24 hours. Critical access issues (e.g., no laptop on day 1)
+are escalated to the IT Director immediately.
