@@ -6,17 +6,20 @@
 ## Implementation Status (13 internal stories)
 - [x] Story 0  — Environment Setup
 - [x] Story 1  — Document Ingestion
-- [x] Story 10 — Streamlit UI (UI SHELL ONLY — currently uses stubbed data; real US 1 backend will replace the stub)
-- [ ] Story 2  — RetrieverAgent
-- [ ] Story 3  — AnalystAgent
+- [x] Story 2  — RetrieverAgent
+- [x] Story 3  — AnalystAgent
+- [x] Story 6  — OrchestratorAgent
+- [x] Story 7  — LangGraph Workflow (US 1 vertical slice — Verifier + Memory nodes will be added in later US)
+- [x] Story 10 — Streamlit UI (now wired to real `graph.workflow.run_query`, not the stub)
 - [ ] Story 4  — VerifierAgent
 - [ ] Story 5  — MemoryAgent
-- [ ] Story 6  — OrchestratorAgent
-- [ ] Story 7  — LangGraph Workflow
 - [ ] Story 8  — Guardrails
 - [ ] Story 9  — Evaluation Logger
 - [ ] Story 11 — Unit Tests
 - [ ] Story 12 — Documentation
+
+## Official Cognizant User Stories
+- [x] **US 1 — Complex Query Handling** — real RAG pipeline working end-to-end. Verified with a multi-doc query that retrieves 5 chunks from 2 sources, plans with 5 steps, synthesizes a 1549-char draft, and produces a final answer with a sources footer.
 
 ## Official Cognizant User Stories — Build Plan
 
@@ -190,6 +193,12 @@ None — awaiting confirmation to start Official US 1 (Complex Query Handling).
 - 2026-06-04 RE-INGESTED `chroma_db/` — 44 chunks now embedded with Ollama/nomic-embed-text; verified retrieval hits the right docs on 5 test queries
 - 2026-06-04 BUG FIX `ui/app.py` — bound `text_input` to stable `st.session_state.query_input` key; sample buttons set the key directly; Ask reads the key and clears it after submit. Query no longer disappears.
 - 2026-06-04 EXTERNAL `ollama pull nomic-embed-text` (274 MB) — local embedding model available
+- 2026-06-04 CREATED `agents/retriever.py` — queries ChromaDB, returns top-k chunks with `{text, source, page, relevance_score, _distance}`. Backend-aware relevance conversion: `1 / (1 + distance)` for Ollama, `1 - distance` for Gemini cosine. Threshold-based filtering (Ollama 0.001, Gemini 0.3).
+- 2026-06-04 CREATED `agents/analyst.py` — Gemini call with strict grounding prompt. Output forced into `[Reasoning] / [Answer] / [Sources Used]` sections. Empty-chunk path returns an explicit "no information" answer (no hallucination).
+- 2026-06-04 CREATED `agents/orchestrator.py` — Gemini call that produces a numbered plan of `[RETRIEVE]` / `[ANALYZE]` / `[VERIFY]` / `[MEMORY]` steps. Safety fallback: if the LLM omits required tags, default steps are appended so the pipeline always has at least `RETRIEVE → ANALYZE → VERIFY`.
+- 2026-06-04 CREATED `graph/workflow.py` — LangGraph `StateGraph` wiring `orchestrate → retrieve → analyze → finalize → END`. `AgentState` TypedDict matches the schema in agents.md §5. `run_query()` is the public entry point. Verification result is a stub (`{confidence: 1.0, ...}` with a `VERIFIER_NOT_IMPLEMENTED_YET` flag) until US 3 lands.
+- 2026-06-04 MODIFIED `ui/app.py` — `STUB_ENABLED=False`, `from graph.workflow import run_query` wired into the Ask flow. Stub still present behind `STUB_ENABLED` for fallback / demo purposes. UI verified to launch on port 8765 (HTTP 200) with the real backend importable.
+- 2026-06-04 VERIFIED US 1 END-TO-END — complex multi-doc query "Compare the parental leave policy with how new parents are onboarded..." returns: 5-step plan, 5 chunks from `policy_hr.txt` + `sop_onboarding.txt`, 1549-char analyst draft, final answer correctly notes that the documents don't contain "specific accommodations" (no hallucination), sources footer attached. `error=None`.
 
 ---
 
