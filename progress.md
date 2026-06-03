@@ -1,7 +1,7 @@
 # Project Progress — Enterprise Knowledge Ops Agent
 
 ## Last Updated
-2026-06-04 — restructured to deliver against the **6 official Cognizant user stories** (agents.md Section 12) instead of the 13 internal implementation stories. Ready to start US 1 on confirmation.
+2026-06-04 — **Official US 1 (Complex Query Handling) is COMPLETE.** Three agents (Retriever, Analyst, Orchestrator) + LangGraph workflow + UI swap all built, end-to-end verified with a complex multi-doc query. Next up: US 2 (EvalLogger), US 3 (Verifier), or US 5 (Guardrails) — awaiting user pick.
 
 ## Implementation Status (13 internal stories)
 - [x] Story 0  — Environment Setup
@@ -20,6 +20,11 @@
 
 ## Official Cognizant User Stories
 - [x] **US 1 — Complex Query Handling** — real RAG pipeline working end-to-end. Verified with a multi-doc query that retrieves 5 chunks from 2 sources, plans with 5 steps, synthesizes a 1549-char draft, and produces a final answer with a sources footer.
+- [ ] US 2 — Agent Planning & Orchestration
+- [ ] US 3 — Grounded & Validated Responses
+- [ ] US 4 — Explainability & Transparency
+- [ ] US 5 — Governance & Guardrails
+- [ ] US 6 — Evaluation, Observability & Failure Detection
 
 ## Official Cognizant User Stories — Build Plan
 
@@ -111,11 +116,17 @@ print('flags:', r['verification_result']['flags'])
 ```
 
 ## Currently In Progress
-None — awaiting confirmation to start Official US 1 (Complex Query Handling).
+None — Official US 1 complete. Awaiting user pick for next US (recommended: US 2 EvalLogger, then US 3 Verifier, then US 5 Guardrails).
 
 ## Completed so far
 - **Impl Story 0** — environment, `.env`, sample docs, `README.md`.
 - **Impl Story 1** — `vector_store/ingest.py` (standalone CLI), 3 sample docs in `docs/`, ChromaDB populated with 44 chunks.
+- **Impl Story 2** — `agents/retriever.py` (ChromaDB queries with backend-aware relevance scoring).
+- **Impl Story 3** — `agents/analyst.py` (Gemini call with strict grounding prompt, structured output).
+- **Impl Story 6** — `agents/orchestrator.py` (Gemini call that produces a numbered plan; safety fallback for missing tags).
+- **Impl Story 7** — `graph/workflow.py` (LangGraph StateGraph wiring all 4 nodes; `run_query()` entry point).
+- **Impl Story 10** — `ui/app.py` (Streamlit UI, now wired to the real `graph.workflow.run_query`).
+- **Official US 1** — Complex Query Handling: real RAG pipeline working end-to-end, verified.
 
 ## Completed Stories Summary
 ### Story 0 ✅
@@ -125,14 +136,38 @@ None — awaiting confirmation to start Official US 1 (Complex Query Handling).
 ### Story 1 ✅
 - Completed: 2026-06-04
 - Notes:
-  - `vector_store/ingest.py` written as a standalone CLI with `--docs-dir`, `--persist-dir`, `--collection` flags.
+  - `vector_store/ingest.py` written as a standalone CLI with `--docs-dir`, `--persist-dir`, `--collection`, `--embedding-backend` flags.
   - Loads `.pdf`, `.txt`, `.md` via `PyPDFLoader` / `TextLoader`.
   - Chunks with `RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)`.
-  - Embeds with `GoogleGenerativeAIEmbeddings(model=GEMINI_EMBEDDING_MODEL)`.
+  - Embeds with either `OllamaEmbeddings(nomic-embed-text)` (default) or `GoogleGenerativeAIEmbeddings(models/gemini-embedding-001)`, controlled by `EMBEDDING_BACKEND` in `.env`.
   - Persists to `chroma_db/` using `Chroma.from_documents(..., persist_directory, collection_name)`.
-  - **Re-runs do not duplicate**: each invocation wipes `chroma_db/` and re-creates the collection.
+  - **Re-runs do not duplicate AND do not destroy data on failure**: safe-swap pattern builds in `chroma_db_new/`, verifies chunk count, then renames into place.
   - Each chunk carries `source` (filename) and `page` (int, 0 for non-PDFs) in metadata.
-  - Smoke-tested end-to-end: 44 chunks (compliance: 18, HR: 12, onboarding: 14).
+  - Re-ingested end-to-end: 44 chunks (compliance: 18, HR: 12, onboarding: 14) embedded with Ollama in ~2s.
+
+### Story 2 ✅ (RetrieverAgent)
+- Completed: 2026-06-04
+- Notes: `agents/retriever.py` — `retrieve(query, k=5) -> List[dict]`. Backend-aware relevance conversion: `1/(1+distance)` for Ollama, `max(0, 1-distance)` for Gemini cosine. Per-backend min-relevance threshold filters poor hits.
+
+### Story 3 ✅ (AnalystAgent)
+- Completed: 2026-06-04
+- Notes: `agents/analyst.py` — `analyze(query, chunks) -> str`. Gemini call with a strict system prompt enforcing grounding in the provided chunks. Output forced into `[Reasoning] / [Answer] / [Sources Used]` sections. Empty-chunk path returns a fixed "no information" answer (no hallucination).
+
+### Story 6 ✅ (OrchestratorAgent)
+- Completed: 2026-06-04
+- Notes: `agents/orchestrator.py` — `plan(query, session_context="") -> List[str]`. Gemini call that produces a numbered plan with `[RETRIEVE] / [ANALYZE] / [VERIFY] / [MEMORY]` tags. Safety fallback appends default steps if the LLM omits any required tag, so the pipeline always has at least `RETRIEVE → ANALYZE → VERIFY`.
+
+### Story 7 ✅ (LangGraph Workflow, US 1 vertical slice)
+- Completed: 2026-06-04
+- Notes: `graph/workflow.py` — `AgentState` TypedDict matches agents.md §5. Nodes: `orchestrate → retrieve → analyze → finalize → END`. `run_query()` is the public entry point. Verification result is a stub (`{confidence: 1.0, ...}` with a `VERIFIER_NOT_IMPLEMENTED_YET` flag) until US 3 inserts a real Verifier node. `finalize_node` strips the `[Reasoning]` and `[Sources Used]` sections out of the analyst's structured output and keeps just the `[Answer]` body, then appends a markdown sources footer.
+
+### Story 10 ✅ (Streamlit UI)
+- Completed: 2026-06-04
+- Notes: `ui/app.py` — built as a UI shell with stubbed data first (so the user could validate the UX shape), then wired to the real `graph.workflow.run_query` after US 1 landed. 4 response tabs (Answer / Agent Trace / Sources / Evaluation Log) and the sidebar (Ingest / Reset / Model info / Session history) all functional. `STUB_ENABLED=False`; the stub is still in the file behind a flag for fallback / demo. Two UI bugs fixed during the iteration: (a) the query used to disappear from the input box on Ask — fixed by binding `text_input` to a stable `st.session_state.query_input` key; (b) a subsequent attempt to clear the key post-submit violated Streamlit's rule that widget keys can only be modified inside callbacks — fixed by dropping the post-submit clear (the input now retains the submitted query, which is actually nicer UX).
+
+### Official US 1 ✅
+- Completed: 2026-06-04
+- Notes: end-to-end verified on a complex multi-doc query ("Compare the parental leave policy with how new parents are onboarded in their first 30 days..."). Result: 5-step plan, 5 chunks from 2 source files, 1549-char analyst draft, final answer correctly notes that the documents lack info about "specific accommodations" (no hallucination), sources footer attached, `error=None`.
 
 ## Blockers
 - ~~BLOCKER 2026-06-03: No `GEMINI_API_KEY` is configured.~~ RESOLVED 2026-06-04: user provided key `AQ.Ab8RN6JWz...` and stored it in `.env` (gitignored). Confirmed working via a real ingestion run.
@@ -205,7 +240,8 @@ None — awaiting confirmation to start Official US 1 (Complex Query Handling).
 ## How an Incoming Agent Should Start
 1. Read `agents.md` (master plan, immutable).
 2. Read this file end to end.
-3. Confirm the user has a real `GEMINI_API_KEY` and at least 2–3 sample docs in `docs/`. If not, that is the very first thing to resolve.
-4. Note the `uv` deviation — run `uv sync` to install; do not look for `requirements.txt`.
-5. Begin Story 1: `vector_store/ingest.py` per agents.md section "USER STORY 1".
-6. After every story, update this file's status checkboxes and the "Completed Stories Summary" section.
+3. Note the `uv` deviation — run `uv sync` to install; do not look for `requirements.txt`.
+4. **The two environment prerequisites (real `GEMINI_API_KEY`, sample docs in `docs/`) are already in place.** If for any reason `chroma_db/` is empty, run `python vector_store/ingest.py` to re-ingest (safe-swap pattern will not destroy data on failure).
+5. Read the "Currently In Progress" and "Completed so far" sections at the top of this file to see exactly where to start.
+6. **US 1 is done.** Per rule #0 (added 2026-06-04), ask the user which official US to build next BEFORE writing any code.
+7. After every completed story or US, update this file's status checkboxes, the "Currently In Progress" / "Completed so far" sections, and append to the "File Change Log".
