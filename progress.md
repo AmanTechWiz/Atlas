@@ -9,13 +9,13 @@ writing a single line of code:
 2. Read this file end to end — at minimum the **Last Updated**, **Implementation Status**, **Official Cognizant User Stories**, **Currently In Progress**, **Blockers**, and **Deviations** sections.
 3. Note the `uv` deviation — run `uv sync` to install; do not look for `requirements.txt`.
 4. **The environment prerequisites (real `GEMINI_API_KEY` in `.env`, sample docs in `docs/`, populated `chroma_db/`) are already in place.** If `chroma_db/` is empty for any reason, run `python vector_store/ingest.py` to re-ingest (safe-swap pattern will not destroy data on failure).
-5. **US 1 is complete.** Per rule #0 (added 2026-06-04 to `agents.md`), ask the user which official US to build next BEFORE writing any code.
+5. **US 1 and US 2 are complete.** Per rule #0 (added 2026-06-04 to `agents.md`), ask the user which official US to build next BEFORE writing any code.
 6. Per rule #0a, when you complete an official US, end your message with the literal line `US(x) completed` and **do not** update this file until the user replies with `ok let's move to next us` (or close). On that reply, update the checkboxes / "Currently In Progress" / "Completed so far" / "File Change Log" / "Deviations" sections, commit, push; then ask which US to build next.
 
 ---
 
 ## Last Updated
-2026-06-04 — **Official US 1 (Complex Query Handling) is COMPLETE.** Three agents (Retriever, Analyst, Orchestrator) + LangGraph workflow + UI swap all built, end-to-end verified with a complex multi-doc query. Next up: US 2 (EvalLogger), US 3 (Verifier), or US 5 (Guardrails) — awaiting user pick.
+2026-06-04 — **Official US 2 (Agent Planning & Orchestration — traceability) is COMPLETE.** EvalLogger + wiring into every node of `graph/workflow.py`. Each query now produces a 7-entry JSON log (QUERY_START → ORCHESTRATION → RETRIEVAL → ANALYSIS → VERIFICATION → FINAL → SUMMARY) at `logs/eval_<session_id>.json`. Two end-to-end queries verified. Next up: US 3 (Verifier), US 4 (Explainability via UI), US 5 (Guardrails), or US 6 (Failure Detection) — awaiting user pick.
 
 ## Implementation Status (13 internal stories)
 - [x] Story 0  — Environment Setup
@@ -23,18 +23,18 @@ writing a single line of code:
 - [x] Story 2  — RetrieverAgent
 - [x] Story 3  — AnalystAgent
 - [x] Story 6  — OrchestratorAgent
-- [x] Story 7  — LangGraph Workflow (US 1 vertical slice — Verifier + Memory nodes will be added in later US)
+- [x] Story 7  — LangGraph Workflow (US 1+2 — orchestrate/retrieve/analyze/finalize + EvalLogger side-channel)
+- [x] Story 9  — Evaluation Logger (EvalLogger class + wired into every node)
 - [x] Story 10 — Streamlit UI (now wired to real `graph.workflow.run_query`, not the stub)
 - [ ] Story 4  — VerifierAgent
 - [ ] Story 5  — MemoryAgent
 - [ ] Story 8  — Guardrails
-- [ ] Story 9  — Evaluation Logger
 - [ ] Story 11 — Unit Tests
 - [ ] Story 12 — Documentation
 
 ## Official Cognizant User Stories
 - [x] **US 1 — Complex Query Handling** — real RAG pipeline working end-to-end. Verified with a multi-doc query that retrieves 5 chunks from 2 sources, plans with 5 steps, synthesizes a 1549-char draft, and produces a final answer with a sources footer.
-- [ ] US 2 — Agent Planning & Orchestration
+- [x] **US 2 — Agent Planning & Orchestration** — every agent's action now leaves a structured JSON trail. Plan, decision_trace, retrieval, analysis, verification, final answer, and a SUMMARY entry all written to `logs/eval_<session_id>.json`.
 - [ ] US 3 — Grounded & Validated Responses
 - [ ] US 4 — Explainability & Transparency
 - [ ] US 5 — Governance & Guardrails
@@ -58,7 +58,7 @@ The 6 official stories from agents.md Section 12 are the *what*; the 13 internal
 **US 1 — Complex Query Handling (Python REPL test):**
 ```bash
 cd /Users/amandeep/Desktop/Atlas
-.venv/bin/python -c "
+uv run python -c "
 from graph.workflow import run_query
 r = run_query('Compare the parental leave policy with the onboarding timeline for new parents.')
 print('--- ANSWER ---'); print(r['final_answer'])
@@ -69,14 +69,23 @@ print('--- CHUNKS USED ---'); print(len(r['retrieved_chunks']))
 
 **US 2 — Planning & Orchestration (inspect plan + decision_trace + log file):**
 ```bash
-.venv/bin/python -c "
+cd /Users/amandeep/Desktop/Atlas
+uv run python -c "
 from graph.workflow import run_query
 r = run_query('What is the MFA requirement?')
 print('PLAN:'); [print(' ', s) for s in r['plan']]
 print('DECISION TRACE:'); [print(' ', t) for t in r['decision_trace']]
 "
+# Then inspect the newest log file in logs/:
 ls -lt logs/ | head -3
-cat logs/eval_*.json | head -50
+uv run python -c "
+import json, glob
+f = sorted(glob.glob('logs/eval_*.json'))[-1]
+entries = json.load(open(f))
+print(f'FILE: {f}  ENTRIES: {len(entries)}')
+for i, e in enumerate(entries, 1):
+    print(f'  [{i}] {e[\"stage\"]:14s} | {e[\"event\"]}')
+"
 ```
 
 **US 3 — Grounded & Validated Responses (inspect verification_result):**
@@ -130,7 +139,7 @@ print('flags:', r['verification_result']['flags'])
 ```
 
 ## Currently In Progress
-None — Official US 1 complete. Awaiting user pick for next US (recommended: US 2 EvalLogger, then US 3 Verifier, then US 5 Guardrails).
+None — Official US 2 complete. Awaiting user pick for next US (recommended: US 3 Verifier, then US 5 Guardrails, then US 4 Explainability via UI).
 
 ## Completed so far
 - **Impl Story 0** — environment, `.env`, sample docs, `README.md`.
@@ -139,8 +148,10 @@ None — Official US 1 complete. Awaiting user pick for next US (recommended: US
 - **Impl Story 3** — `agents/analyst.py` (Gemini call with strict grounding prompt, structured output).
 - **Impl Story 6** — `agents/orchestrator.py` (Gemini call that produces a numbered plan; safety fallback for missing tags).
 - **Impl Story 7** — `graph/workflow.py` (LangGraph StateGraph wiring all 4 nodes; `run_query()` entry point).
+- **Impl Story 9** — `evaluation/logger.py` (`EvalLogger` class, fire-and-forget JSON file per query).
 - **Impl Story 10** — `ui/app.py` (Streamlit UI, now wired to the real `graph.workflow.run_query`).
 - **Official US 1** — Complex Query Handling: real RAG pipeline working end-to-end, verified.
+- **Official US 2** — Agent Planning & Orchestration (traceability portion): EvalLogger + wiring into every node of the workflow.
 
 ## Completed Stories Summary
 ### Story 0 ✅
@@ -179,9 +190,22 @@ None — Official US 1 complete. Awaiting user pick for next US (recommended: US
 - Completed: 2026-06-04
 - Notes: `ui/app.py` — built as a UI shell with stubbed data first (so the user could validate the UX shape), then wired to the real `graph.workflow.run_query` after US 1 landed. 4 response tabs (Answer / Agent Trace / Sources / Evaluation Log) and the sidebar (Ingest / Reset / Model info / Session history) all functional. `STUB_ENABLED=False`; the stub is still in the file behind a flag for fallback / demo. Two UI bugs fixed during the iteration: (a) the query used to disappear from the input box on Ask — fixed by binding `text_input` to a stable `st.session_state.query_input` key; (b) a subsequent attempt to clear the key post-submit violated Streamlit's rule that widget keys can only be modified inside callbacks — fixed by dropping the post-submit clear (the input now retains the submitted query, which is actually nicer UX).
 
+### Story 9 ✅ (Evaluation Logger)
+- Completed: 2026-06-04
+- Notes:
+  - `evaluation/logger.py` — `EvalLogger` class. One JSON file per query at `logs/eval_<session_id>.json`. Each entry has `{timestamp (ISO 8601 UTC), stage, event, data}`. Stages: `QUERY_START`, `ORCHESTRATION`, `RETRIEVAL`, `ANALYSIS`, `VERIFICATION`, `FINAL`, `FAILURE`, `SUMMARY`.
+  - Fire-and-forget design: every `log_*` call catches `OSError` and emits a warning to the Python `logging` module under `"eval_logger"`. The workflow never crashes because of a log write failure.
+  - File is fully rewritten on every entry (not appended). Reason: small N (≤8 entries per query), queries are LLM-bound so the cost is negligible, and a single file is easier to inspect/parse than NDJSON.
+  - RETRIEVAL entry includes a 200-char `text_preview` per chunk (extra beyond the agents.md spec of "chunk count, sources, scores" — useful for post-hoc debugging without bloating the file).
+  - SUMMARY entry includes everything downstream consumers need: query, plan, retrieval_count, sources, confidence, grounded, flags, final_answer, total_time_ms. Single-call audit trail.
+
 ### Official US 1 ✅
 - Completed: 2026-06-04
 - Notes: end-to-end verified on a complex multi-doc query ("Compare the parental leave policy with how new parents are onboarded in their first 30 days..."). Result: 5-step plan, 5 chunks from 2 source files, 1549-char analyst draft, final answer correctly notes that the documents lack info about "specific accommodations" (no hallucination), sources footer attached, `error=None`.
+
+### Official US 2 ✅
+- Completed: 2026-06-04
+- Notes: end-to-end verified on two real queries. (1) "What is the MFA requirement?" — 4-step plan, 5 chunks from `compliance_manual.txt` + `sop_onboarding.txt`, 469-char analyst draft, log file is 6 KB with 7 entries. (2) US 1 regression: "Compare the parental leave policy with the onboarding timeline for new parents." — 4 plan steps, 5 chunks from `policy_hr.txt` + `sop_onboarding.txt`, 1539-char analyst draft, 7-entry log file, `error=None`. Plan, decision_trace, and final-answer-with-sources-footer all unchanged from US 1 — the logger is a pure side-channel, no behavior regression. Verification is still the stub (`{confidence: 1.0, ...}` with `VERIFIER_NOT_IMPLEMENTED_YET` flag); US 3 will replace it with a real Gemini-based grounding check.
 
 ## Blockers
 - ~~BLOCKER 2026-06-03: No `GEMINI_API_KEY` is configured.~~ RESOLVED 2026-06-04: user provided key `AQ.Ab8RN6JWz...` and stored it in `.env` (gitignored). Confirmed working via a real ingestion run.
@@ -206,6 +230,11 @@ None — Official US 1 complete. Awaiting user pick for next US (recommended: US
 - CHANGE 2026-06-04: Embedding backend switched from Gemini to Ollama. Default is now `EMBEDDING_BACKEND=ollama` in `.env` (uses local `nomic-embed-text` model). Gemini remains available as a fallback — set `EMBEDDING_BACKEND=gemini` to switch back. Reason: free-tier Gemini embedding rate-limit (100 req/min) caused a failed re-ingest via the UI to wipe the database. Ollama has no rate limit, no API key required, and is fully local. Re-ingested 44 chunks successfully in ~2s.
 - BUG FIX 2026-06-04: `vector_store/ingest.py` now uses a safe-swap pattern. The old code did `shutil.rmtree(persist_dir)` at the very start of every run, which destroyed existing data if the embed step later failed. The new code builds a NEW collection in `chroma_db_new/`, verifies it has the expected number of chunks, and only then renames it into place. If the embed step fails for any reason, the existing `chroma_db/` is left untouched.
 - BUG FIX 2026-06-04: `ui/app.py` had a Streamlit session-state bug where the query text would disappear from the input box on the Ask click. The old code used `st.session_state.pop("pending_query", "")` as the `value=` of the `text_input`, which reset the widget to empty on every rerun. Fixed by binding the text input to a stable `st.session_state.query_input` key — sample buttons set the key, Ask reads the key and clears it after submit.
+- DEVIATION Story 9: agents.md prescribes a JSON file with one entry per stage written to `logs/eval_{timestamp}.json`. The implementation rewrites the whole file on every `log_*` call (not appends) and stores the entries in memory as a Python list. Reason: simpler, atomic on disk for small files, easy to inspect, and queries are LLM-bound (slow) so the per-entry rewrite cost is negligible. The end result on disk is identical to what agents.md describes.
+- DEVIATION Story 9: agents.md says the RETRIEVAL log should contain "chunk count, sources, scores". The implementation also includes a 200-char `text_preview` per chunk. Reason: lets a reader of the log file see the gist of what was retrieved without opening the chunks separately; bloats the log by ~1 KB per query which is fine.
+- DEVIATION Story 9: the EvalLogger instance is passed through LangGraph state as `state["eval_logger"]` rather than a global or thread-local. Reason: keeps each query's log file isolated even under concurrent use; matches the existing pattern of "state is the shared object between nodes".
+- DEVIATION Story 9: `log_final` and `log_summary` are called from `run_query()` after `app.invoke()` returns, not from a node. Reason: they need the final elapsed time and the fully-populated state, which are only known once the graph completes. Putting them in a node would require either another edge to a "summary" node (added complexity) or measuring time inside a node (inaccurate — node time ≠ total query time).
+- DEVIATION Story 9: SUMMARY entry includes a precomputed `sources` list (extracted from chunks) in addition to `retrieval_count`. Reason: downstream consumers (US 4 UI, US 6 failure detection) often want "which docs were used" without having to walk the chunks again.
 
 ## Environment State
 - OS: macOS (darwin)
@@ -254,6 +283,10 @@ None — Official US 1 complete. Awaiting user pick for next US (recommended: US
 - 2026-06-04 MODIFIED `agents.md` — added rule #0a to Section 11 (handoff protocol: end US completion with `US(x) completed`, wait for user `ok let's move to next us` before updating `progress.md`). Moved the "How an Incoming Agent Should Start" section to the top of the file as a new Section 0.5; left a one-line pointer in Section 11. Section 0.5 also includes a reminder of rule #0a.
 - 2026-06-04 MODIFIED `progress.md` — "How an Incoming Agent Should Start" content updated to point at agents.md Section 0.5 and to mention rule #0a. Added three new DEVIATION entries to record the rule #0a addition, the agents.md Section 0.5 move, and the new reminder at the top of `agents.md`. (At this point the section was still at the bottom of `progress.md`; see the next line for the move to the top.)
 - 2026-06-04 MODIFIED `progress.md` — moved "How an Incoming Agent Should Start" to a new Section 0 at the top of this file (right after the title, before "Last Updated"). The section is now self-contained — an incoming agent can read it first, then proceed. A one-line pointer at the bottom of the file tells readers where the full version lives. Added one new DEVIATION entry recording the move.
+- 2026-06-04 CREATED `evaluation/logger.py` — `EvalLogger` class. One JSON file per query at `logs/eval_<session_id>.json`. Each entry is `{timestamp (ISO 8601 UTC), stage, event, data}`. Stages: `QUERY_START`, `ORCHESTRATION`, `RETRIEVAL`, `ANALYSIS`, `VERIFICATION`, `FINAL`, `FAILURE`, `SUMMARY`. Fire-and-forget — write errors are caught and logged to Python's `logging` module under `"eval_logger"` instead of crashing the workflow. File is rewritten on every `log_*` call (simpler than NDJSON, equivalent on disk, queries are slow so the cost is negligible).
+- 2026-06-04 MODIFIED `graph/workflow.py` — `AgentState` gains `eval_logger` (EvalLogger instance) and `query_start_mono` (float for timing). Every node reads the logger from state and calls the appropriate `log_*` method; on exception, `log_failure(str(e), STAGE)` is called before propagating the error back to LangGraph. `run_query()` creates the logger, calls `log_query_start`, runs the graph, then calls `log_final` + `log_summary` with elapsed wall time. The summary includes the full plan, retrieval count, sources, confidence, grounded, flags, and the final answer. Verification is still a stub (US 3's job) but is already logged.
+- 2026-06-04 VERIFIED US 2 END-TO-END — two real queries: (1) "What is the MFA requirement?" produces a 6 KB log file with 7 entries (QUERY_START, ORCHESTRATION, RETRIEVAL, ANALYSIS, VERIFICATION, FINAL, SUMMARY); all timestamps ISO 8601, valid JSON, correct schema `{timestamp, stage, event, data}`. (2) US 1 regression: "Compare the parental leave policy with the onboarding timeline for new parents." still returns 4 plan steps, 5 chunks from `policy_hr.txt` + `sop_onboarding.txt`, 1539-char draft, sources footer, `error=None`. Plan + decision_trace + final answer all unchanged from US 1 — the logger is a pure side-channel, no behavior regression. UI module (`ui/app.py`) still imports cleanly.
+- 2026-06-04 MODIFIED `progress.md` — per rule #0a (added 2026-06-04 to `agents.md` Section 11), this update happens AFTER the user acknowledged "ok US2 completed". Marked Story 9 + Official US 2 complete; updated Last Updated, Currently In Progress, Completed so far, Build Plan test command for US 2 (switched `.venv/bin/python` → `uv run python` to match the uv deviation). Added 5 new DEVIATION entries for Story 9. Added 3 new File Change Log entries.
 
 ---
 
