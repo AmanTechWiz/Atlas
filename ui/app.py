@@ -336,7 +336,6 @@ def render_main() -> None:
                 "timestamp": datetime.now().strftime("%H:%M:%S"),
             }
         )
-        st.session_state.query_input = ""
 
     if st.session_state.last_result:
         st.markdown("---")
