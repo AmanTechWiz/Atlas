@@ -1,16 +1,27 @@
 """LangGraph workflow wiring all agents together.
 
-Official US 1+2 flow:
-  START -> orchestrate -> retrieve -> analyze -> finalize -> END
+Official US 1+2+3 flow:
+  START -> orchestrate -> retrieve -> analyze -> verify
+                                                  |
+                                  confidence < 0.6 ?
+                                  /                 \
+                              yes                   no
+                              /                      \
+                  low_confidence                   finalize
+                              \                     /
+                               `-> finalize <-'
+                                       |
+                                      END
 
 US 1: real RAG pipeline (orchestrate, retrieve, analyze, finalize).
 US 2: every node calls EvalLogger to write a structured JSON entry
-      to logs/eval_<session_id>.json. run_query() writes a SUMMARY
-      entry at the end with the final state.
+      to logs/eval_<session_id>.json.
+US 3: real Verifier node replaces the stub verification_result.
+      Conditional edge adds a low-confidence disclaimer to the
+      final answer when the Verifier's confidence is < 0.6.
 
-US 3 will insert a Verifier node after `analyze` (with a conditional
-edge for low-confidence answers). US 5 will insert Guardrails before
-`orchestrate`. The current graph is the US 1+2 vertical slice.
+US 5 will insert Guardrails before `orchestrate`. The current graph
+is the US 1+2+3 vertical slice.
 """
 
 from __future__ import annotations
@@ -34,11 +45,20 @@ from langgraph.graph import END, START, StateGraph
 from agents.analyst import analyze
 from agents.orchestrator import plan
 from agents.retriever import retrieve
+from agents.verifier import verify
 from evaluation.logger import EvalLogger
 
 load_dotenv(dotenv_path=str(Path(__file__).resolve().parent.parent / ".env"))
 
 log = logging.getLogger("workflow")
+
+CONFIDENCE_THRESHOLD = 0.6
+
+DISCLAIMER = (
+    "**Low confidence — answer may not be fully supported by the source "
+    "documents.** Treat the information above as provisional and verify "
+    "against the cited sources before acting on it."
+)
 
 
 class AgentState(TypedDict, total=False):
@@ -51,6 +71,7 @@ class AgentState(TypedDict, total=False):
     decision_trace: List[str]
     session_history: List[Dict[str, Any]]
     error: Optional[str]
+    needs_disclaimer: bool
     eval_logger: EvalLogger
     query_start_mono: float
 
@@ -136,6 +157,53 @@ def analyze_node(state: AgentState) -> Dict[str, Any]:
         )
 
 
+def verify_node(state: AgentState) -> Dict[str, Any]:
+    elog = _get_logger(state)
+    try:
+        draft = state.get("draft_answer", "")
+        chunks = state.get("retrieved_chunks") or []
+        result = verify(draft, chunks)
+        if elog is not None:
+            elog.log_verification(result)
+        return _ok_node(
+            state, "VERIFIER",
+            {"verification_result": result},
+            f"confidence={result['confidence']:.2f}, grounded={result['grounded']}, {len(result['flags'])} flag(s)",
+        )
+    except Exception as e:
+        log.exception("Verifier failed")
+        fallback = {
+            "confidence": 0.5,
+            "grounded": False,
+            "flags": [
+                f"VERIFIER_NODE_ERROR — {e}",
+                "LOW_CONFIDENCE — answer may not be fully supported by documents",
+            ],
+        }
+        if elog is not None:
+            elog.log_failure(str(e), "VERIFIER")
+            elog.log_verification(fallback)
+        return _ok_node(
+            state, "VERIFIER",
+            {"verification_result": fallback},
+            f"FAILED — {e}",
+        )
+
+
+def route_after_verify(state: AgentState) -> str:
+    confidence = (state.get("verification_result") or {}).get("confidence", 1.0)
+    return "low_confidence" if confidence < CONFIDENCE_THRESHOLD else "finalize"
+
+
+def low_confidence_node(state: AgentState) -> Dict[str, Any]:
+    confidence = (state.get("verification_result") or {}).get("confidence", 0.0)
+    return _ok_node(
+        state, "LOW_CONFIDENCE",
+        {"needs_disclaimer": True},
+        f"confidence={confidence:.2f} < {CONFIDENCE_THRESHOLD} — flagging for disclaimer",
+    )
+
+
 def _extract_answer_section(draft: str) -> str:
     if "[Answer]" not in draft:
         return draft.strip()
@@ -147,7 +215,6 @@ def _extract_answer_section(draft: str) -> str:
 
 
 def finalize_node(state: AgentState) -> Dict[str, Any]:
-    elog = _get_logger(state)
     draft = state.get("draft_answer", "")
     chunks = state.get("retrieved_chunks") or []
     answer_body = _extract_answer_section(draft)
@@ -158,23 +225,20 @@ def finalize_node(state: AgentState) -> Dict[str, Any]:
     else:
         footer = "\n\n---\n**Sources:** (none — no relevant chunks were retrieved)"
 
-    verification = {
-        "confidence": 1.0,
-        "grounded": True,
-        "flags": [
-            "VERIFIER_NOT_IMPLEMENTED_YET — Official US 3 will add the real grounding check"
-        ],
-    }
-    if elog is not None:
-        elog.log_verification(verification)
+    body = answer_body + footer
+    if state.get("needs_disclaimer"):
+        body = DISCLAIMER + "\n\n" + body
+
+    detail = "assembled final answer"
+    if state.get("needs_disclaimer"):
+        detail += " with low-confidence disclaimer + sources footer"
+    else:
+        detail += " with sources footer"
 
     return _ok_node(
         state, "FINALIZE",
-        {
-            "final_answer": answer_body + footer,
-            "verification_result": verification,
-        },
-        "assembled final answer with sources footer",
+        {"final_answer": body},
+        detail,
     )
 
 
@@ -183,11 +247,19 @@ def build_graph():
     g.add_node("orchestrate", orchestrate_node)
     g.add_node("retrieve", retrieve_node)
     g.add_node("analyze", analyze_node)
+    g.add_node("verify", verify_node)
+    g.add_node("low_confidence", low_confidence_node)
     g.add_node("finalize", finalize_node)
     g.add_edge(START, "orchestrate")
     g.add_edge("orchestrate", "retrieve")
     g.add_edge("retrieve", "analyze")
-    g.add_edge("analyze", "finalize")
+    g.add_edge("analyze", "verify")
+    g.add_conditional_edges(
+        "verify",
+        route_after_verify,
+        {"low_confidence": "low_confidence", "finalize": "finalize"},
+    )
+    g.add_edge("low_confidence", "finalize")
     g.add_edge("finalize", END)
     return g.compile()
 
@@ -196,7 +268,7 @@ app = build_graph()
 
 
 def run_query(query: str) -> AgentState:
-    """Run the full US 1+2 pipeline. Returns the populated AgentState.
+    """Run the full US 1+2+3 pipeline. Returns the populated AgentState.
 
     Side effect: writes a structured JSON log to logs/eval_<session_id>.json
     with one entry per agent stage plus a final SUMMARY entry.
@@ -214,6 +286,7 @@ def run_query(query: str) -> AgentState:
         "decision_trace": [],
         "session_history": [],
         "error": None,
+        "needs_disclaimer": False,
         "eval_logger": eval_logger,
         "query_start_mono": time.monotonic(),
     }
@@ -236,10 +309,13 @@ def run_query(query: str) -> AgentState:
     )
 
     log.info(
-        "run_query complete: %d plan step(s), %d chunk(s), final_answer %d chars, %d ms, error=%s, log=%s",
+        "run_query complete: %d plan step(s), %d chunk(s), final_answer %d chars, "
+        "verification confidence=%.2f grounded=%s, %d ms, error=%s, log=%s",
         len(plan_steps),
         len(chunks),
         len(final_answer),
+        float(verification.get("confidence", 0.0) or 0.0),
+        verification.get("grounded"),
         int(elapsed_ms),
         result.get("error"),
         eval_logger.log_path,
