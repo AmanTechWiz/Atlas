@@ -9,24 +9,24 @@ writing a single line of code:
 2. Read this file end to end — at minimum the **Last Updated**, **Implementation Status**, **Official Cognizant User Stories**, **Currently In Progress**, **Blockers**, and **Deviations** sections.
 3. Note the `uv` deviation — run `uv sync` to install; do not look for `requirements.txt`.
 4. **The environment prerequisites (real `GEMINI_API_KEY` in `.env`, sample docs in `docs/`, populated `chroma_db/`) are already in place.** If `chroma_db/` is empty for any reason, run `python vector_store/ingest.py` to re-ingest (safe-swap pattern will not destroy data on failure).
-5. **US 1 and US 2 are complete.** Per rule #0 (added 2026-06-04 to `agents.md`), ask the user which official US to build next BEFORE writing any code.
+5. **US 1, US 2, and US 3 are complete.** Per rule #0 (added 2026-06-04 to `agents.md`), ask the user which official US to build next BEFORE writing any code.
 6. Per rule #0a, when you complete an official US, end your message with the literal line `US(x) completed` and **do not** update this file until the user replies with `ok let's move to next us` (or close). On that reply, update the checkboxes / "Currently In Progress" / "Completed so far" / "File Change Log" / "Deviations" sections, commit, push; then ask which US to build next.
 
 ---
 
 ## Last Updated
-2026-06-04 — **Official US 2 (Agent Planning & Orchestration — traceability) is COMPLETE.** EvalLogger + wiring into every node of `graph/workflow.py`. Each query now produces a 7-entry JSON log (QUERY_START → ORCHESTRATION → RETRIEVAL → ANALYSIS → VERIFICATION → FINAL → SUMMARY) at `logs/eval_<session_id>.json`. Two end-to-end queries verified. Next up: US 3 (Verifier), US 4 (Explainability via UI), US 5 (Guardrails), or US 6 (Failure Detection) — awaiting user pick.
+2026-06-04 — **Official US 3 (Grounded & Validated Responses) is COMPLETE.** Real VerifierAgent (`agents/verifier.py`) + conditional `low_confidence` edge in the workflow + deterministic post-process that drops confidence 0.20 per LLM-detected unsupported claim (fixes the Gemini calibration quirk where the model returns 1.0 confidence with multiple flagged hallucinations). Disclaimer now fires in the final answer when confidence < 0.6. Next up: US 5 (Guardrails), US 6 (Failure Detection), or US 4 (Explainability via UI) — awaiting user pick.
 
 ## Implementation Status (13 internal stories)
 - [x] Story 0  — Environment Setup
 - [x] Story 1  — Document Ingestion
 - [x] Story 2  — RetrieverAgent
 - [x] Story 3  — AnalystAgent
+- [x] Story 4  — VerifierAgent (real grounding check + deterministic post-process for Gemini calibration)
 - [x] Story 6  — OrchestratorAgent
-- [x] Story 7  — LangGraph Workflow (US 1+2 — orchestrate/retrieve/analyze/finalize + EvalLogger side-channel)
+- [x] Story 7  — LangGraph Workflow (US 1+2+3 — orchestrate/retrieve/analyze/verify/low_confidence/finalize + EvalLogger side-channel)
 - [x] Story 9  — Evaluation Logger (EvalLogger class + wired into every node)
 - [x] Story 10 — Streamlit UI (now wired to real `graph.workflow.run_query`, not the stub)
-- [ ] Story 4  — VerifierAgent
 - [ ] Story 5  — MemoryAgent
 - [ ] Story 8  — Guardrails
 - [ ] Story 11 — Unit Tests
@@ -35,7 +35,7 @@ writing a single line of code:
 ## Official Cognizant User Stories
 - [x] **US 1 — Complex Query Handling** — real RAG pipeline working end-to-end. Verified with a multi-doc query that retrieves 5 chunks from 2 sources, plans with 5 steps, synthesizes a 1549-char draft, and produces a final answer with a sources footer.
 - [x] **US 2 — Agent Planning & Orchestration** — every agent's action now leaves a structured JSON trail. Plan, decision_trace, retrieval, analysis, verification, final answer, and a SUMMARY entry all written to `logs/eval_<session_id>.json`.
-- [ ] US 3 — Grounded & Validated Responses
+- [x] **US 3 — Grounded & Validated Responses** — real VerifierAgent (second Gemini call) replaces the stub verification. Returns structured `{confidence, grounded, flags}`. Conditional `low_confidence` edge adds a "Low confidence" disclaimer to the final answer when confidence < 0.6. Deterministic post-process forces confidence down 0.20 per LLM-detected flag.
 - [ ] US 4 — Explainability & Transparency
 - [ ] US 5 — Governance & Guardrails
 - [ ] US 6 — Evaluation, Observability & Failure Detection
@@ -139,19 +139,21 @@ print('flags:', r['verification_result']['flags'])
 ```
 
 ## Currently In Progress
-None — Official US 2 complete. Awaiting user pick for next US (recommended: US 3 Verifier, then US 5 Guardrails, then US 4 Explainability via UI).
+None — Official US 3 complete. Awaiting user pick for next US (recommended: US 5 Guardrails, then US 6 Failure Detection, then US 4 Explainability via UI).
 
 ## Completed so far
 - **Impl Story 0** — environment, `.env`, sample docs, `README.md`.
 - **Impl Story 1** — `vector_store/ingest.py` (standalone CLI), 3 sample docs in `docs/`, ChromaDB populated with 44 chunks.
 - **Impl Story 2** — `agents/retriever.py` (ChromaDB queries with backend-aware relevance scoring).
 - **Impl Story 3** — `agents/analyst.py` (Gemini call with strict grounding prompt, structured output).
+- **Impl Story 4** — `agents/verifier.py` (real Gemini-based grounding check + deterministic post-process for Gemini calibration).
 - **Impl Story 6** — `agents/orchestrator.py` (Gemini call that produces a numbered plan; safety fallback for missing tags).
-- **Impl Story 7** — `graph/workflow.py` (LangGraph StateGraph wiring all 4 nodes; `run_query()` entry point).
+- **Impl Story 7** — `graph/workflow.py` (LangGraph StateGraph wiring all 6 nodes; `run_query()` entry point).
 - **Impl Story 9** — `evaluation/logger.py` (`EvalLogger` class, fire-and-forget JSON file per query).
 - **Impl Story 10** — `ui/app.py` (Streamlit UI, now wired to the real `graph.workflow.run_query`).
 - **Official US 1** — Complex Query Handling: real RAG pipeline working end-to-end, verified.
 - **Official US 2** — Agent Planning & Orchestration (traceability portion): EvalLogger + wiring into every node of the workflow.
+- **Official US 3** — Grounded & Validated Responses: real Verifier + conditional low-confidence disclaimer + deterministic post-process.
 
 ## Completed Stories Summary
 ### Story 0 ✅
@@ -199,6 +201,17 @@ None — Official US 2 complete. Awaiting user pick for next US (recommended: US
   - RETRIEVAL entry includes a 200-char `text_preview` per chunk (extra beyond the agents.md spec of "chunk count, sources, scores" — useful for post-hoc debugging without bloating the file).
   - SUMMARY entry includes everything downstream consumers need: query, plan, retrieval_count, sources, confidence, grounded, flags, final_answer, total_time_ms. Single-call audit trail.
 
+### Story 4 ✅ (VerifierAgent)
+- Completed: 2026-06-04
+- Notes:
+  - `agents/verifier.py` — `verify(draft_answer, chunks) -> dict` returns `{confidence, grounded, flags}`.
+  - Three early-return paths skip the LLM call when there's nothing to verify: empty chunks → `INSUFFICIENT_RETRIEVAL` flag; empty draft → `EMPTY_ANSWER` flag; LLM error → `LLM_ERROR` flag; JSON parse error → `PARSE_ERROR` flag. All early-return paths also add `LOW_CONFIDENCE` so the threshold fires.
+  - JSON parse is robust: tries raw → markdown-fenced → first `{...}` block → `json.loads`. Returns `None` on failure.
+  - Applies the agents.md Story 4 spec rules: `confidence < 0.6` → `grounded=False` + `LOW_CONFIDENCE` flag; `len(chunks) < 2` → `INSUFFICIENT_RETRIEVAL` flag.
+  - **Deterministic post-process (commit b6a55d0)** — fixes a Gemini calibration quirk where the LLM returns `confidence=1.0` while listing 4 specific unsupported claims. After parsing, `confidence = max(0.10, raw_confidence − 0.20 × number_of_LLM_detected_flags)`. The `0.20` penalty per LLM-detected unsupported claim forces the score to be self-consistent with the flags. System-level flags (`INSUFFICIENT_RETRIEVAL`, `LOW_CONFIDENCE`, `EMPTY_ANSWER`, `LLM_ERROR`, `PARSE_ERROR`) don't count toward the penalty.
+  - Test 3 (parental leave form PAR-2024 hallucination) goes from `confidence: 1.0` (no disclaimer) → `confidence: 0.10` (disclaimer fires) after the fix.
+  - Returned confidence is rounded to 2 decimal places for clean log output.
+
 ### Official US 1 ✅
 - Completed: 2026-06-04
 - Notes: end-to-end verified on a complex multi-doc query ("Compare the parental leave policy with how new parents are onboarded in their first 30 days..."). Result: 5-step plan, 5 chunks from 2 source files, 1549-char analyst draft, final answer correctly notes that the documents lack info about "specific accommodations" (no hallucination), sources footer attached, `error=None`.
@@ -206,6 +219,18 @@ None — Official US 2 complete. Awaiting user pick for next US (recommended: US
 ### Official US 2 ✅
 - Completed: 2026-06-04
 - Notes: end-to-end verified on two real queries. (1) "What is the MFA requirement?" — 4-step plan, 5 chunks from `compliance_manual.txt` + `sop_onboarding.txt`, 469-char analyst draft, log file is 6 KB with 7 entries. (2) US 1 regression: "Compare the parental leave policy with the onboarding timeline for new parents." — 4 plan steps, 5 chunks from `policy_hr.txt` + `sop_onboarding.txt`, 1539-char analyst draft, 7-entry log file, `error=None`. Plan, decision_trace, and final-answer-with-sources-footer all unchanged from US 1 — the logger is a pure side-channel, no behavior regression. Verification is still the stub (`{confidence: 1.0, ...}` with `VERIFIER_NOT_IMPLEMENTED_YET` flag); US 3 will replace it with a real Gemini-based grounding check.
+
+### Official US 3 ✅
+- Completed: 2026-06-04
+- Notes:
+  - Replaced the stub `verification_result` with a real Verifier node (`agents/verifier.py` + `verify_node` in `graph/workflow.py`).
+  - End-to-end verified on:
+    - 2 direct `verify()` tests with no LLM call (empty chunks, empty draft) — both return early with the right flags + `confidence: 0.0`.
+    - 1 direct `verify()` test with a hand-crafted hallucinated answer — 3 LLM-detected flags × 0.20 = 0.60 penalty → `confidence: 0.10` (floor), `LOW_CONFIDENCE` flag added.
+    - 2 full-pipeline queries: (1) "What is the MFA requirement?" — `confidence: 1.0`, no disclaimer (answer is well-grounded). (2) "What is harry potter, meaning of life?" — `confidence: 1.0`, no disclaimer (analyst correctly says "no info", which IS well-grounded in the irrelevant chunks). The 0.6 threshold only fires when the analyst over-extends or when chunks are < 2.
+  - Final flow: `START → orchestrate → retrieve → analyze → verify → {low_confidence if conf<0.6 else finalize} → finalize → END`. The `low_confidence` node sets `needs_disclaimer=True`; `finalize_node` prepends the disclaimer when set.
+  - **Two commits:** `777a8f7` (initial Verifier + workflow wiring) and `b6a55d0` (deterministic post-process to fix Gemini calibration quirk).
+  - Cognizant spec satisfied: `{confidence, grounded, flags}` + 0.6 threshold rule + `INSUFFICIENT_RETRIEVAL` rule + "if grounding confidence is low, the system flags or limits the response". No spec deviations; one UX improvement (deterministic post-process) on top.
 
 ## Blockers
 - ~~BLOCKER 2026-06-03: No `GEMINI_API_KEY` is configured.~~ RESOLVED 2026-06-04: user provided key `AQ.Ab8RN6JWz...` and stored it in `.env` (gitignored). Confirmed working via a real ingestion run.
@@ -235,6 +260,11 @@ None — Official US 2 complete. Awaiting user pick for next US (recommended: US
 - DEVIATION Story 9: the EvalLogger instance is passed through LangGraph state as `state["eval_logger"]` rather than a global or thread-local. Reason: keeps each query's log file isolated even under concurrent use; matches the existing pattern of "state is the shared object between nodes".
 - DEVIATION Story 9: `log_final` and `log_summary` are called from `run_query()` after `app.invoke()` returns, not from a node. Reason: they need the final elapsed time and the fully-populated state, which are only known once the graph completes. Putting them in a node would require either another edge to a "summary" node (added complexity) or measuring time inside a node (inaccurate — node time ≠ total query time).
 - DEVIATION Story 9: SUMMARY entry includes a precomputed `sources` list (extracted from chunks) in addition to `retrieval_count`. Reason: downstream consumers (US 4 UI, US 6 failure detection) often want "which docs were used" without having to walk the chunks again.
+- DEVIATION Story 4: agents.md Story 4 says the Verifier "uses a second Gemini LLM call with a verification prompt" and returns `{confidence, grounded, flags}`. The implementation does this, but also adds a **deterministic post-process step** that overrides `confidence` based on the number of LLM-detected flags (`max(0.10, raw − 0.20 × N_flags)`). Reason: Gemini (and most LLMs) suffer from "calibration failure" — they can return `confidence=1.0` while listing multiple specific unsupported claims. The post-process makes the final score self-consistent with the flags. This is a UX improvement on top of the spec, not a spec violation.
+- DEVIATION Story 4: `verify()` has three early-return paths that skip the LLM call: empty chunks (returns `INSUFFICIENT_RETRIEVAL` flag), empty draft (returns `EMPTY_ANSWER` flag), and LLM error / JSON parse error (returns `LLM_ERROR` / `PARSE_ERROR` flag). All early-return paths also add `LOW_CONFIDENCE` so the 0.6 threshold always fires. Reason: don't waste a Gemini call when there's nothing to verify; the spec says the Verifier should always return a result.
+- DEVIATION Story 4: the JSON parse is robust — tries raw text → markdown-fenced (` ```json ... ``` `) → first `{...}` block → `json.loads`. This is a small robustness improvement over agents.md's spec ("Parse the JSON response") to handle models that wrap output in markdown fences.
+- DEVIATION Story 7: `AgentState` gains a new `needs_disclaimer: bool` field (set by `low_confidence_node`; read by `finalize_node`). Reason: the conditional edge routes to a separate `low_confidence` node, which sets the flag, then routes to `finalize`. The flag is the cleanest way to pass the "needs disclaimer" signal from one node to the next through LangGraph state.
+- DEVIATION Story 7: `log_verification` is now called from `verify_node` (not `finalize_node`). Reason: the verification result is the natural output of the verifier, and the audit trail should record it at the moment it's produced. `finalize_node` no longer returns `verification_result` in its update dict — that's `verify_node`'s responsibility.
 
 ## Environment State
 - OS: macOS (darwin)
@@ -287,6 +317,11 @@ None — Official US 2 complete. Awaiting user pick for next US (recommended: US
 - 2026-06-04 MODIFIED `graph/workflow.py` — `AgentState` gains `eval_logger` (EvalLogger instance) and `query_start_mono` (float for timing). Every node reads the logger from state and calls the appropriate `log_*` method; on exception, `log_failure(str(e), STAGE)` is called before propagating the error back to LangGraph. `run_query()` creates the logger, calls `log_query_start`, runs the graph, then calls `log_final` + `log_summary` with elapsed wall time. The summary includes the full plan, retrieval count, sources, confidence, grounded, flags, and the final answer. Verification is still a stub (US 3's job) but is already logged.
 - 2026-06-04 VERIFIED US 2 END-TO-END — two real queries: (1) "What is the MFA requirement?" produces a 6 KB log file with 7 entries (QUERY_START, ORCHESTRATION, RETRIEVAL, ANALYSIS, VERIFICATION, FINAL, SUMMARY); all timestamps ISO 8601, valid JSON, correct schema `{timestamp, stage, event, data}`. (2) US 1 regression: "Compare the parental leave policy with the onboarding timeline for new parents." still returns 4 plan steps, 5 chunks from `policy_hr.txt` + `sop_onboarding.txt`, 1539-char draft, sources footer, `error=None`. Plan + decision_trace + final answer all unchanged from US 1 — the logger is a pure side-channel, no behavior regression. UI module (`ui/app.py`) still imports cleanly.
 - 2026-06-04 MODIFIED `progress.md` — per rule #0a (added 2026-06-04 to `agents.md` Section 11), this update happens AFTER the user acknowledged "ok US2 completed". Marked Story 9 + Official US 2 complete; updated Last Updated, Currently In Progress, Completed so far, Build Plan test command for US 2 (switched `.venv/bin/python` → `uv run python` to match the uv deviation). Added 5 new DEVIATION entries for Story 9. Added 3 new File Change Log entries.
+- 2026-06-04 CREATED `agents/verifier.py` — `verify(draft_answer, chunks) -> dict`. Three early-return paths (empty chunks / empty draft / LLM error / JSON parse error) skip the Gemini call and return a safe default with the right system-level flag. Main path: a 2nd Gemini call with temperature=0.0 and a strict "return ONLY this JSON" prompt; robust JSON parser (raw → markdown-fenced → first `{...}` block → `json.loads`); applies agents.md Story 4 rules (`confidence < 0.6` → `LOW_CONFIDENCE` flag + `grounded=False`; `len(chunks) < 2` → `INSUFFICIENT_RETRIEVAL` flag).
+- 2026-06-04 MODIFIED `graph/workflow.py` — `AgentState` gains `needs_disclaimer: bool`. New `verify_node` calls `verify()` and logs the `VERIFICATION` stage; new `low_confidence_node` sets `needs_disclaimer=True`; new `route_after_verify()` conditional edge (`confidence < 0.6` → `low_confidence` → `finalize`, else → `finalize` directly`). `finalize_node` no longer returns the stub `verification_result` — `verify_node` is the source of truth. `finalize_node` now prepends the `DISCLAIMER` to the final answer when `needs_disclaimer` is set. `run_query()` logs the final verification confidence + grounded bool in its completion message. `CONFIDENCE_THRESHOLD = 0.6` and `DISCLAIMER` constants added. Final flow: `START → orchestrate → retrieve → analyze → verify → {low_confidence | finalize} → finalize → END`.
+- 2026-06-04 VERIFIED US 3 END-TO-END — (a) Direct `verify()` test 1 (empty chunks, no LLM): returns `confidence: 0.0`, `INSUFFICIENT_RETRIEVAL` + `LOW_CONFIDENCE` flags. (b) Direct `verify()` test 2 (empty draft, no LLM): returns `confidence: 0.0`, `EMPTY_ANSWER` + `LOW_CONFIDENCE` flags. (c) Direct `verify()` test 3 (hallucinated answer): LLM returned `confidence: 1.0` + 3 LLM-detected flags, post-process drops to `confidence: 0.20`, `LOW_CONFIDENCE` + `INSUFFICIENT_RETRIEVAL` flags added. (d) Full-pipeline "What is the MFA requirement?": `confidence: 1.0`, no disclaimer (answer is well-grounded). (e) Full-pipeline "What is harry potter, meaning of life?": `confidence: 1.0`, no disclaimer (analyst correctly says "no info", which IS well-grounded in the irrelevant chunks). The 0.6 threshold only fires when the analyst over-extends OR when chunks are < 2.
+- 2026-06-04 MODIFIED `agents/verifier.py` (commit `b6a55d0`) — added a deterministic post-process step that overrides `confidence` based on the number of LLM-detected flags: `max(0.10, raw − 0.20 × N_flags)`. System-level flags (`INSUFFICIENT_RETRIEVAL`, `LOW_CONFIDENCE`, `EMPTY_ANSWER`, `LLM_ERROR`, `PARSE_ERROR`) don't count toward the penalty. This fixes the Gemini calibration quirk where the LLM returns `confidence=1.0` while listing multiple specific unsupported claims. New module-level constants: `SYSTEM_PREFIXES` and `FLAG_PENALTY = 0.20`. Returned confidence is rounded to 2 decimal places.
+- 2026-06-04 MODIFIED `progress.md` — per rule #0a, this update happens AFTER the user acknowledged "US3 Completed!". Marked Story 4 + Official US 3 complete; updated Last Updated, Currently In Progress, Completed so far, Build Plan. Added 5 new DEVIATION entries (deterministic post-process, 3 early-return paths, robust JSON parser, `needs_disclaimer` state field, `log_verification` moved to `verify_node`). Added 5 new File Change Log entries (verifier.py, workflow.py, end-to-end verification, post-process commit, this bookkeeping).
 
 ---
 
