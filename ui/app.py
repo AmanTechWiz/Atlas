@@ -162,8 +162,14 @@ def render_answer_tab(result: dict[str, Any]) -> None:
     confidence = float(v.get("confidence", 0.0) or 0.0)
     grounded = bool(v.get("grounded", False))
     flags = v.get("flags", []) or []
+    api_error = result.get("api_error")
 
-    if confidence < 0.6:
+    if api_error:
+        st.error(f"**Service unavailable** — {api_error}")
+        st.caption("The Agent Trace tab shows which stage failed. The low-confidence "
+                   "banner is suppressed because the cause is an upstream API failure, "
+                   "not a weak retrieval.")
+    elif confidence < 0.6:
         st.error(
             f"**Low confidence** ({confidence:.2f}) — the answer may not be fully supported "
             f"by the retrieved source documents. Treat it as provisional and verify against "
@@ -175,7 +181,8 @@ def render_answer_tab(result: dict[str, Any]) -> None:
             f"See the Agent Trace tab for details."
         )
 
-    st.markdown(confidence_badge(confidence), unsafe_allow_html=True)
+    if not api_error:
+        st.markdown(confidence_badge(confidence), unsafe_allow_html=True)
     st.markdown("### Final Answer")
     st.markdown(result["final_answer"])
 
@@ -315,11 +322,15 @@ def render_sidebar() -> None:
 
         st.markdown("### Model Info")
         llm = os.getenv("GEMINI_MODEL", "not set")
-        emb = os.getenv("GEMINI_EMBEDDING_MODEL", "not set")
-        backend = os.getenv("EMBEDDING_BACKEND", "not set")
+        backend = os.getenv("EMBEDDING_BACKEND", "not set").lower()
+        if backend == "ollama":
+            emb_display = f"Ollama (`{os.getenv('OLLAMA_EMBED_MODEL', 'nomic-embed-text')}`)"
+        elif backend == "gemini":
+            emb_display = f"Gemini (`{os.getenv('GEMINI_EMBEDDING_MODEL', 'models/gemini-embedding-001')}`)"
+        else:
+            emb_display = f"unknown backend `{backend}`"
         st.markdown(f"- **LLM:** `{llm}`")
-        st.markdown(f"- **Embeddings:** `{emb}`")
-        st.markdown(f"- **Embedding backend:** `{backend}`")
+        st.markdown(f"- **Embeddings:** {emb_display}")
 
         st.markdown("### Actions")
         if st.button("Ingest Documents", use_container_width=True):

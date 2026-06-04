@@ -42,6 +42,7 @@ warnings.filterwarnings(
 from dotenv import load_dotenv
 from langgraph.graph import END, START, StateGraph
 
+from agents._api_errors import friendly_api_error
 from agents.analyst import analyze
 from agents.orchestrator import plan
 from agents.retriever import retrieve
@@ -71,6 +72,7 @@ class AgentState(TypedDict, total=False):
     decision_trace: List[str]
     session_history: List[Dict[str, Any]]
     error: Optional[str]
+    api_error: Optional[str]
     needs_disclaimer: bool
     eval_logger: EvalLogger
     query_start_mono: float
@@ -103,12 +105,13 @@ def orchestrate_node(state: AgentState) -> Dict[str, Any]:
         )
     except Exception as e:
         log.exception("Orchestrator failed")
+        api_msg = friendly_api_error(e)
         if elog is not None:
-            elog.log_failure(str(e), "ORCHESTRATOR")
+            elog.log_failure(api_msg, "ORCHESTRATOR")
         return _ok_node(
             state, "ORCHESTRATOR",
-            {"plan": [], "error": f"orchestrator_failed: {e}"},
-            f"FAILED — {e}",
+            {"plan": [], "error": f"orchestrator_failed: {e}", "api_error": api_msg},
+            f"FAILED — {api_msg}",
         )
 
 
@@ -148,12 +151,17 @@ def analyze_node(state: AgentState) -> Dict[str, Any]:
         )
     except Exception as e:
         log.exception("Analyst failed")
+        api_msg = friendly_api_error(e)
         if elog is not None:
-            elog.log_failure(str(e), "ANALYST")
+            elog.log_failure(api_msg, "ANALYST")
         return _ok_node(
             state, "ANALYST",
-            {"draft_answer": "", "error": f"analyst_failed: {e}"},
-            f"FAILED — {e}",
+            {
+                "draft_answer": "",
+                "error": f"analyst_failed: {e}",
+                "api_error": api_msg,
+            },
+            f"FAILED — {api_msg}",
         )
 
 
@@ -172,21 +180,22 @@ def verify_node(state: AgentState) -> Dict[str, Any]:
         )
     except Exception as e:
         log.exception("Verifier failed")
+        api_msg = friendly_api_error(e)
         fallback = {
             "confidence": 0.5,
             "grounded": False,
             "flags": [
-                f"VERIFIER_NODE_ERROR — {e}",
+                f"VERIFIER_NODE_ERROR — {api_msg}",
                 "LOW_CONFIDENCE — answer may not be fully supported by documents",
             ],
         }
         if elog is not None:
-            elog.log_failure(str(e), "VERIFIER")
+            elog.log_failure(api_msg, "VERIFIER")
             elog.log_verification(fallback)
         return _ok_node(
             state, "VERIFIER",
-            {"verification_result": fallback},
-            f"FAILED — {e}",
+            {"verification_result": fallback, "api_error": api_msg},
+            f"FAILED — {api_msg}",
         )
 
 
@@ -215,6 +224,7 @@ def _extract_answer_section(draft: str) -> str:
 
 
 def finalize_node(state: AgentState) -> Dict[str, Any]:
+    api_error = state.get("api_error")
     draft = state.get("draft_answer", "")
     chunks = state.get("retrieved_chunks") or []
     answer_body = _extract_answer_section(draft)
@@ -226,11 +236,21 @@ def finalize_node(state: AgentState) -> Dict[str, Any]:
         footer = "\n\n---\n**Sources:** (none — no relevant chunks were retrieved)"
 
     body = answer_body + footer
-    if state.get("needs_disclaimer"):
+    if state.get("needs_disclaimer") and not api_error:
         body = DISCLAIMER + "\n\n" + body
 
+    if api_error:
+        body = (
+            f"**Service notice — {api_error}** The pipeline could not produce a "
+            f"grounded answer for this query. You can retry once the model is "
+            f"available again, or check the Agent Trace tab to see which stage "
+            f"failed.\n\n" + body
+        )
+
     detail = "assembled final answer"
-    if state.get("needs_disclaimer"):
+    if api_error:
+        detail += " with API-error notice"
+    elif state.get("needs_disclaimer"):
         detail += " with low-confidence disclaimer + sources footer"
     else:
         detail += " with sources footer"
@@ -286,6 +306,7 @@ def run_query(query: str) -> AgentState:
         "decision_trace": [],
         "session_history": [],
         "error": None,
+        "api_error": None,
         "needs_disclaimer": False,
         "eval_logger": eval_logger,
         "query_start_mono": time.monotonic(),
