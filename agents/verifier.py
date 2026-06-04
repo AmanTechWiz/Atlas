@@ -43,6 +43,16 @@ log = logging.getLogger("verifier")
 
 DEFAULT_MODEL = "gemini-flash-latest"
 
+SYSTEM_PREFIXES = (
+    "INSUFFICIENT_RETRIEVAL",
+    "LOW_CONFIDENCE",
+    "EMPTY_ANSWER",
+    "LLM_ERROR",
+    "PARSE_ERROR",
+)
+
+FLAG_PENALTY = 0.20
+
 _llm = None
 
 
@@ -200,6 +210,10 @@ def verify(draft_answer: str, chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     grounded = bool(parsed.get("grounded", confidence >= 0.6))
 
+    llm_detected_flags = [f for f in flags if not f.startswith(SYSTEM_PREFIXES)]
+    if llm_detected_flags:
+        confidence = max(0.10, confidence - len(llm_detected_flags) * FLAG_PENALTY)
+
     if confidence < 0.6:
         grounded = False
         if not any("LOW_CONFIDENCE" in f for f in flags):
@@ -210,12 +224,12 @@ def verify(draft_answer: str, chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
             flags.append(f"INSUFFICIENT_RETRIEVAL — only {len(chunks)} chunk(s) retrieved (< 2)")
 
     log.info(
-        "Verifier result: confidence=%.2f, grounded=%s, %d flag(s)",
-        confidence, grounded, len(flags),
+        "Verifier result: confidence=%.2f, grounded=%s, %d flag(s) (%d LLM-detected)",
+        confidence, grounded, len(flags), len(llm_detected_flags),
     )
 
     return {
-        "confidence": confidence,
+        "confidence": round(confidence, 2),
         "grounded": grounded,
         "flags": flags,
     }
