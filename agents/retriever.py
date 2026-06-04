@@ -6,9 +6,18 @@ Acceptance criteria (agents.md Story 2):
 - Low-relevance chunks are filtered
 
 The relevance score is a backend-aware normalized value in [0, 1] where
-1.0 = perfect match. For Ollama (L2-style distance, unbounded), we use
-1 / (1 + distance). For Gemini (cosine, distance in [0, 2]), we use
-1 - distance. The minimum relevance threshold is applied per-backend.
+1.0 = perfect match.
+
+For Gemini embeddings ChromaDB stores them normalized and uses cosine
+distance natively, so relevance = 1 - distance (distance in [0, 2]).
+
+For Ollama embeddings ChromaDB uses L2 (squared euclidean) distance and
+the vectors are unnormalized (nomic-embed-text returns vectors of norm
+~22.8, so n^2 ~ 520). We convert L2^2 to a pseudo-cosine using the
+identity cos = 1 - L2^2 / (2 * n^2), then clamp to [0, 1]. This gives
+scores in the [0, 1] range with real dynamic range (0.5 - 0.8 for the
+top-5 of a typical query), so the UI can show meaningful badges and
+the min-relevance threshold filters out truly unrelated chunks.
 """
 
 from __future__ import annotations
@@ -48,8 +57,14 @@ PERSIST_DIR = Path(__file__).resolve().parent.parent / "chroma_db"
 COLLECTION_NAME = "enterprise_docs"
 DEFAULT_K = 5
 
-MIN_RELEVANCE_OLLAMA = 0.001
-MIN_RELEVANCE_GEMINI = 0.3
+MIN_RELEVANCE_OLLAMA = 0.50
+MIN_RELEVANCE_GEMINI = 0.30
+
+# Ollama's nomic-embed-text returns 768-dim vectors with L2 norm ~22.8
+# (measured empirically). Used to convert ChromaDB's L2^2 distance into
+# a pseudo-cosine similarity. If you swap to a different embed model
+# (e.g. mxbai-embed-large, all-minilm), update this constant.
+_OLLAMA_EMBED_NORM_SQ = 520.0
 
 _vectorstore = None
 
@@ -93,7 +108,8 @@ def _get_vectorstore():
 
 def _distance_to_relevance(distance: float) -> float:
     if _is_ollama():
-        return 1.0 / (1.0 + distance)
+        pseudo_cos = 1.0 - distance / (2.0 * _OLLAMA_EMBED_NORM_SQ)
+        return max(0.0, min(1.0, pseudo_cos))
     return max(0.0, 1.0 - distance)
 
 
