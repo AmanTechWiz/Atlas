@@ -49,9 +49,44 @@ SYSTEM_PREFIXES = (
     "EMPTY_ANSWER",
     "LLM_ERROR",
     "PARSE_ERROR",
+    "NO_ANSWER_FROM_CORPUS",
 )
 
 FLAG_PENALTY = 0.20
+
+# Phrases the Analyst uses to signal "I cannot answer from these chunks".
+# If the draft contains any of these, the Verifier should NOT report high
+# confidence, because the user did not actually receive an answer — even
+# though the refusal itself is technically grounded in the absence of
+# relevant chunks. We cap confidence at 0.3 and add a flag so the UI
+# shows a clear low-confidence banner.
+_REFUSAL_PATTERNS = (
+    "i cannot answer",
+    "i can't answer",
+    "unable to answer",
+    "cannot be answered",
+    "do not contain",
+    "does not contain",
+    "no information",
+    "not mentioned",
+    "not specified",
+    "not addressed",
+    "is not mentioned",
+    "is not specified",
+    "is not addressed",
+    "is unclear",
+    "not available in the",
+    "based on the available information",
+    "the provided documents do not",
+    "no relevant information",
+)
+
+
+def _is_refusal(draft_answer: str) -> bool:
+    if not draft_answer:
+        return False
+    text = draft_answer.lower()
+    return any(p in text for p in _REFUSAL_PATTERNS)
 
 _llm = None
 
@@ -222,6 +257,16 @@ def verify(draft_answer: str, chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
     if len(chunks) < 2:
         if not any("INSUFFICIENT_RETRIEVAL" in f for f in flags):
             flags.append(f"INSUFFICIENT_RETRIEVAL — only {len(chunks)} chunk(s) retrieved (< 2)")
+
+    if _is_refusal(draft_answer):
+        confidence = min(confidence, 0.30)
+        grounded = False
+        if not any("NO_ANSWER_FROM_CORPUS" in f for f in flags):
+            flags.append(
+                "NO_ANSWER_FROM_CORPUS — the analyst found no relevant information in the retrieved documents"
+            )
+        if not any("LOW_CONFIDENCE" in f for f in flags):
+            flags.append("LOW_CONFIDENCE — answer may not be fully supported by documents")
 
     log.info(
         "Verifier result: confidence=%.2f, grounded=%s, %d flag(s) (%d LLM-detected)",
