@@ -198,6 +198,20 @@ def render_answer_tab(result: dict[str, Any]) -> None:
                 st.markdown(f"- `{f}`")
 
 
+def _score_badge_html(label: str, value: float) -> str:
+    if value >= 0.7:
+        color, band = "#1f9d55", "HIGH"
+    elif value >= 0.5:
+        color, band = "#b08800", "MEDIUM"
+    else:
+        color, band = "#c0392b", "LOW"
+    return (
+        f'<span style="background:{color};color:white;padding:3px 9px;'
+        f'border-radius:10px;font-weight:600;font-size:0.8em;margin-right:6px;">'
+        f"{label}: {value:.2f} ({band})</span>"
+    )
+
+
 def render_agent_trace_tab(result: dict[str, Any]) -> None:
     st.markdown("### Orchestrator Plan")
     for i, step in enumerate(result["plan"], 1):
@@ -221,10 +235,67 @@ def render_agent_trace_tab(result: dict[str, Any]) -> None:
 
     st.markdown("### Verifier Result")
     v = result["verification_result"]
-    st.json(v)
+
+    if "grounding_confidence" in v:
+        st.markdown(
+            _score_badge_html("Grounding", v["grounding_confidence"])
+            + _score_badge_html("Answer Q.", v["answer_quality"])
+            + _score_badge_html("Retrieval", v["retrieval_confidence"]),
+            unsafe_allow_html=True,
+        )
+
     if v.get("flags"):
         for f in v["flags"]:
             st.warning(f"Flag: {f}")
+
+    claims = v.get("claims") or []
+    if claims:
+        with st.expander(f"Claims ({len(claims)}) — per-claim support tags"):
+            for i, c in enumerate(claims, 1):
+                support = c.get("support", "unsupported")
+                color_map = {
+                    "direct": "#1f9d55",
+                    "reasonable_inference": "#5a9bd4",
+                    "absence_supported": "#b08800",
+                    "unsupported": "#c0392b",
+                    "contradicted": "#7b1fa2",
+                }
+                color = color_map.get(support, "#777")
+                st.markdown(
+                    f"**{i}.** "
+                    f'<span style="background:{color};color:white;padding:2px 8px;'
+                    f'border-radius:8px;font-size:0.75em;font-weight:600;">{support}</span> '
+                    f"_{c.get('claim', '')}_",
+                    unsafe_allow_html=True,
+                )
+                if c.get("source"):
+                    st.caption(f"source: `{c['source']}`")
+                if c.get("reason"):
+                    st.caption(f"why: {c['reason']}")
+
+    aspects = v.get("question_aspects") or []
+    if aspects:
+        with st.expander(f"Question aspects ({len(aspects)}) — what the answer actually covered"):
+            for i, a in enumerate(aspects, 1):
+                status = a.get("status", "not_answered")
+                color_map = {
+                    "answered": "#1f9d55",
+                    "partially_answered": "#b08800",
+                    "not_answered": "#c0392b",
+                }
+                color = color_map.get(status, "#777")
+                st.markdown(
+                    f"**{i}.** "
+                    f'<span style="background:{color};color:white;padding:2px 8px;'
+                    f'border-radius:8px;font-size:0.75em;font-weight:600;">{status}</span> '
+                    f"_{a.get('aspect', '')}_",
+                    unsafe_allow_html=True,
+                )
+                if a.get("reason"):
+                    st.caption(f"why: {a['reason']}")
+
+    with st.expander("Raw verification JSON"):
+        st.json(v)
 
 
 def render_sources_tab(result: dict[str, Any]) -> None:
