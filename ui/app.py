@@ -158,7 +158,24 @@ def confidence_badge(confidence: float) -> str:
 
 
 def render_answer_tab(result: dict[str, Any]) -> None:
-    st.markdown(confidence_badge(result["verification_result"]["confidence"]), unsafe_allow_html=True)
+    v = result.get("verification_result") or {}
+    confidence = float(v.get("confidence", 0.0) or 0.0)
+    grounded = bool(v.get("grounded", False))
+    flags = v.get("flags", []) or []
+
+    if confidence < 0.6:
+        st.error(
+            f"**Low confidence** ({confidence:.2f}) — the answer may not be fully supported "
+            f"by the retrieved source documents. Treat it as provisional and verify against "
+            f"the cited sources before acting on it."
+        )
+    elif not grounded:
+        st.warning(
+            f"**Not grounded** ({confidence:.2f}) — the Verifier flagged issues with the answer. "
+            f"See the Agent Trace tab for details."
+        )
+
+    st.markdown(confidence_badge(confidence), unsafe_allow_html=True)
     st.markdown("### Final Answer")
     st.markdown(result["final_answer"])
 
@@ -167,6 +184,11 @@ def render_answer_tab(result: dict[str, Any]) -> None:
         st.markdown(
             "**Sources:** " + " · ".join(f"`{s}`" for s in unique_sources)
         )
+
+    if flags:
+        with st.expander(f"Verifier flags ({len(flags)})"):
+            for f in flags:
+                st.markdown(f"- `{f}`")
 
 
 def render_agent_trace_tab(result: dict[str, Any]) -> None:
@@ -212,9 +234,39 @@ def render_sources_tab(result: dict[str, Any]) -> None:
 
 
 def render_eval_log_tab(result: dict[str, Any]) -> None:
-    st.markdown("### Full Evaluation Log (raw JSON)")
-    payload = {k: v for k, v in result.items() if k != "session_history"}
-    st.json(payload)
+    log_path = result.get("log_path")
+    st.markdown("### On-Disk Evaluation Log")
+    if log_path:
+        st.caption(f"`{log_path}`")
+        try:
+            with open(log_path, "r", encoding="utf-8") as f:
+                entries = json.load(f)
+            st.success(f"Loaded {len(entries)} stage entries from disk.")
+
+            stages = [e.get("stage", "?") for e in entries]
+            st.markdown("**Timeline:** " + " → ".join(stages))
+
+            summary_idx = next(
+                (i for i, e in enumerate(entries) if e.get("stage") == "SUMMARY"), None
+            )
+            if summary_idx is not None:
+                with st.expander("Summary entry (executive overview)"):
+                    st.json(entries[summary_idx])
+
+            with st.expander("Full on-disk log (all stages, raw JSON)"):
+                st.json(entries)
+        except FileNotFoundError:
+            st.warning(f"Log file not found at `{log_path}`. Was the log directory moved?")
+        except json.JSONDecodeError as e:
+            st.error(f"Log file is not valid JSON: {e}")
+    else:
+        st.info("No `log_path` in result — this query was run outside `graph.workflow.run_query`.")
+
+    st.markdown("---")
+    st.markdown("### In-Memory State (live result)")
+    payload = {k: v for k, v in result.items() if k not in ("session_history", "eval_logger", "query_start_mono")}
+    with st.expander("In-memory state (raw Python dict)"):
+        st.json(payload)
 
 
 def run_ingest() -> tuple[bool, str]:
@@ -264,8 +316,10 @@ def render_sidebar() -> None:
         st.markdown("### Model Info")
         llm = os.getenv("GEMINI_MODEL", "not set")
         emb = os.getenv("GEMINI_EMBEDDING_MODEL", "not set")
+        backend = os.getenv("EMBEDDING_BACKEND", "not set")
         st.markdown(f"- **LLM:** `{llm}`")
         st.markdown(f"- **Embeddings:** `{emb}`")
+        st.markdown(f"- **Embedding backend:** `{backend}`")
 
         st.markdown("### Actions")
         if st.button("Ingest Documents", use_container_width=True):
@@ -333,7 +387,7 @@ def render_main() -> None:
 
     if ask and st.session_state.query_input.strip():
         query = st.session_state.query_input
-        with st.spinner("Running agent pipeline (orchestrate → retrieve → analyze → finalize)..."):
+        with st.spinner("Running agent pipeline (orchestrate → retrieve → analyze → verify → finalize)..."):
             if STUB_ENABLED or run_query is None:
                 result = stub_run_query(query)
             else:

@@ -291,6 +291,7 @@ def run_query(query: str) -> AgentState:
         "query_start_mono": time.monotonic(),
     }
     result = app.invoke(initial)
+    result["log_path"] = str(eval_logger.log_path)
 
     elapsed_ms = (time.monotonic() - result.get("query_start_mono", time.monotonic())) * 1000.0
     final_answer = result.get("final_answer", "") or ""
