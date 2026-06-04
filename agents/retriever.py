@@ -49,7 +49,7 @@ from langchain_community.embeddings import OllamaEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
-load_dotenv(dotenv_path=str(Path(__file__).resolve().parent.parent / ".env"))
+load_dotenv(dotenv_path=str(Path(__file__).resolve().parent.parent / ".env"), override=True)
 
 log = logging.getLogger("retriever")
 

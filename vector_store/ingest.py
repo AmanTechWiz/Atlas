@@ -248,7 +248,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
-    load_dotenv()
+    load_dotenv(override=True)
     args = parse_args()
     docs_dir = Path(args.docs_dir)
     persist_dir = Path(args.persist_dir)

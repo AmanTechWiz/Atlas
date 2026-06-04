@@ -49,7 +49,7 @@ from agents.retriever import retrieve
 from agents.verifier import verify
 from evaluation.logger import EvalLogger
 
-load_dotenv(dotenv_path=str(Path(__file__).resolve().parent.parent / ".env"))
+load_dotenv(dotenv_path=str(Path(__file__).resolve().parent.parent / ".env"), override=True)
 
 log = logging.getLogger("workflow")
 

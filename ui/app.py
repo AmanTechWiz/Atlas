@@ -27,7 +27,7 @@ warnings.filterwarnings(
     category=DeprecationWarning,
 )
 
-load_dotenv(dotenv_path=str(Path(__file__).resolve().parent.parent / ".env"))
+load_dotenv(dotenv_path=str(Path(__file__).resolve().parent.parent / ".env"), override=True)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 INGEST_SCRIPT = PROJECT_ROOT / "vector_store" / "ingest.py"
