@@ -183,9 +183,9 @@ Every node writes to the `decision_trace` field of `AgentState` so the full reas
 | ------------------------------------- | ------------------------------------------------------------------------ |
 | [`agents.md`](./agents.md)            | Master plan, agent roles, LangGraph schema, all 12 implementation stories |
 | [`progress.md`](./progress.md)        | Live progress tracker, blockers, deviations, file change log              |
-| `ARCHITECTURE.md` (Story 12)          | Architecture diagram, design decisions, trade-offs                        |
-| `EVALUATION.md` (Story 12)            | Guardrails, grounding, confidence threshold, failure modes               |
-| `UNIT_TESTS.md` (Story 12)            | What each test covers, how to run them, expected outcomes                 |
+| [`ARCHITECTURE.md`](./ARCHITECTURE.md) | Architecture diagram, design decisions, trade-offs                        |
+| [`EVALUATION.md`](./EVALUATION.md)    | Guardrails, grounding, confidence threshold, failure modes               |
+| [`UNIT_TESTS.md`](./UNIT_TESTS.md)    | What each test covers, how to run them, expected outcomes                 |
 
 ---
 

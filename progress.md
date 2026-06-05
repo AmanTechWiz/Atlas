@@ -30,7 +30,7 @@ writing a single line of code:
 - [x] Story 9  — Evaluation Logger (`EvalLogger` class + `GUARDRAIL` stage for rejections, side-channel for every node)
 - [x] Story 10 — Streamlit UI (per-session UUID, file uploader for PDF/DOCX/TXT/MD, 4 tabs, confidence badge, reset button, 7-node spinner)
 - [~] Story 11 — Unit Tests (127 deterministic tests pass: 74 guardrails + 24 memory + 29 verifier helpers; `test_retriever.py` and `test_orchestrator.py` still pending)
-- [ ] Story 12 — Documentation (3 deliverables: `ARCHITECTURE.md`, `EVALUATION.md`, `UNIT_TESTS.md` — next up)
+- [x] Story 12 — Documentation (`ARCHITECTURE.md`, `EVALUATION.md`, `UNIT_TESTS.md` — 3 explicit project-spec deliverables)
 
 ## Official Cognizant User Stories
 - [x] **US 1 — Complex Query Handling** — real RAG pipeline working end-to-end. Verified with a multi-doc query that retrieves 5 chunks from 2 sources, plans with 5 steps, synthesizes a 1549-char draft, and produces a final answer with a sources footer.
@@ -139,7 +139,7 @@ print('flags:', r['verification_result']['flags'])
 ```
 
 ## Currently In Progress
-**Story 12 — Documentation.** Building the 3 explicit deliverables (`ARCHITECTURE.md`, `EVALUATION.md`, `UNIT_TESTS.md`) that the spec calls for. US 5 code is fully committed (commits `302b601`, `4921ad8`, `7f815eb`) and 127 tests pass; this docs cycle is the next deliverable. US 6 (final piece — "conflicting agent outputs" detection) is queued after docs.
+None — **US 5 closed out**, **Story 12 (Documentation) shipped**: `ARCHITECTURE.md` (328 lines), `EVALUATION.md` (355 lines), `UNIT_TESTS.md` (341 lines). 127 tests verified passing in 0.45s. Next up: **US 6 (final piece — "conflicting agent outputs" detection)** — the only remaining gap in the spec's failure-detection surface. Awaiting user pick.
 
 ## Completed so far
 - **Impl Story 0** — environment, `.env`, sample docs, `README.md`.
@@ -159,6 +159,7 @@ print('flags:', r['verification_result']['flags'])
 - **Impl Story 5** — MemoryAgent: `agents/memory.py` with `add()` / `get_context()` / `reset()` / `history` / `__len__`. `memory_node` wired into the LangGraph flow (finalize → memory → END). Orchestrator reads `memory.get_context()` into its planning prompt. 24 unit tests in `tests/test_memory.py`.
 - **Impl Story 8** — Guardrails: `guardrails/checks.py` corpus-agnostic. 19 prompt-injection patterns, special-char/repetition heuristics, length cap (5-2000), empty-corpus block. `apply_confidence_guardrail` prepends a `DISCLAIMER` when `confidence < 0.6` and always appends a sorted, deduped `**Sources:**` footer. 74 unit tests.
 - **Impl Story 10** — UI rewrite (per-session, file uploader): each browser session gets a UUID4 12-char session_id, its own ChromaDB collection at `chroma_db_sessions/session_<id>/`, and its own `MemoryAgent`. `st.file_uploader` accepts PDF/DOCX/TXT/MD; "Index uploaded files" button runs `safe_ingest_files()`; "Reset Session" button deletes the collection and regenerates the session_id. Sample queries in the UI changed to generic ("Summarize", "Compare") so they're corpus-agnostic.
+- **Impl Story 12** — Documentation: 3 project-spec deliverables. `ARCHITECTURE.md` (328 lines) — ASCII flow diagram, `AgentState` schema, 5-agent role breakdown, LangGraph design trade-offs, failure handling matrix, file map. `EVALUATION.md` (355 lines) — input/output guardrail details, RAG-Triad grounding scoring, confidence threshold rationale, full failure-mode matrix, observability surface, known limitations. `UNIT_TESTS.md` (341 lines) — per-test breakdown of the 127 tests, design principles, run commands, expected outcome, deliberate scope boundaries.
 
 ## Completed Stories Summary
 ### Story 0 ✅
@@ -259,6 +260,14 @@ print('flags:', r['verification_result']['flags'])
 - Completed: 2026-06-05
 - Notes: `agents/memory.py` — `MemoryAgent(session_id)` with `add()` / `get_context(last_n=3, max_answer_chars=400)` / `reset()` / `history` (read-only) / `__len__`. Pure-Python, no LLM, no persistence. Wired into `graph/workflow.py` as `memory_node` (finalize → memory → END). Orchestrator reads `memory.get_context()` into its planning prompt. `run_query(query, memory=mem)` accepts an optional instance. 24 unit tests in `tests/test_memory.py`.
 
+### Story 12 ✅ (Documentation)
+- Completed: 2026-06-05
+- Notes: 3 project-spec deliverables, one commit each (all `main` pushed):
+  - `e629ed4` — `ARCHITECTURE.md` (328 lines). ASCII flow diagram, `AgentState` schema table, 5-agent role breakdown, LangGraph design trade-offs, failure handling matrix, file map.
+  - `3ebce13` — `EVALUATION.md` (355 lines). Input guardrail details, output guardrail details, RAG-Triad grounding scoring (weights, caps, flags), confidence threshold rationale, full failure-mode matrix, observability surface (EvalLogger stages), known limitations.
+  - `d6d29e5` — `UNIT_TESTS.md` (341 lines). Per-test breakdown of all 127 tests (29 verifier + 24 memory + 74 guardrails), design principles, run commands, expected outcome, deliberate scope boundaries (no retriever/analyst/UI tests — they need live LLM/embedder/Streamlit).
+- All 3 docs cross-link to each other and to `progress.md` / `agents.md` / `README.md`. Verified `uv run python -m pytest tests/ -q` → 127 passed in 0.45s.
+
 ### Story 8 ✅ (Guardrails)
 - Completed: 2026-06-05
 - Notes: `guardrails/checks.py` exposes two public functions. `validate_input(query, corpus_size=0)` rejects empty/None, non-string, too-short (<5), too-long (>2000), special-char-heavy (>50%), repetition-heavy (>60%), prompt-injection patterns (19 regex), and queries against an empty corpus. `apply_confidence_guardrail(verification_result, answer, chunks, threshold=0.6)` prepends a `DISCLAIMER` when `confidence < threshold` and always appends a sorted, deduped `**Sources:**` footer. `DISCLAIMER` is a module constant. Corpus-agnostic — works for HR, legal, finance, IT, operations, or any enterprise document set. 74 unit tests in `tests/test_guardrails.py`.
@@ -323,6 +332,8 @@ print('flags:', r['verification_result']['flags'])
 - DEVIATION US 5: the legacy sample docs (`docs/policy_hr.txt`, `docs/sop_onboarding.txt`, `docs/compliance_manual.txt`) and the `docs/` directory were deleted as part of the same cycle. Reason: the new per-session upload model means the user provides their own corpora, and the hardcoded HR-specific files would be misleading sample data for the "fully agentic" framing. The CLI `vector_store/ingest.py` still works with a directory passed via `--docs-dir`, so anyone who needs to bulk-ingest a corpus can still do so — they just need to create the directory themselves.
 - DEVIATION Story 5: `MemoryAgent` is a pure-Python class, NOT a LangGraph node with its own LLM. The agents.md Story 5 spec says "Implement a simple in-memory store: `session_history: List[dict]`". The implementation matches the spec — no LLM call, no summarization, no persistence. The "agent" name is consistent with the project's 5-agent architecture, but it's really a session-scoped data structure, not a reasoning agent.
 - DEVIATION Story 5: `MemoryAgent.get_context()` truncates answers at `max_answer_chars=400` by default. Reason: prompt-injection safety — a long prior answer could itself become an injection vector if injected verbatim into the next orchestrator prompt. 400 chars is enough to capture the semantic gist of a prior answer without re-prompting the LLM with thousands of tokens of user content.
+- DEVIATION Story 12: the spec lists 3 documentation deliverables: `ARCHITECTURE.md`, `EVALUATION.md`, `UNIT_TESTS.md`. Implemented as 3 separate files, one per deliverable, each fully self-contained. The `README.md` has a "Documentation" table that points to all 3. The `progress.md` "Last Updated" / "Currently In Progress" / "Completed so far" / "Completed Stories Summary" sections now reference the 3 docs by name.
+- DEVIATION Story 12: commit messages for the 3 docs deliberately do NOT mention the project-spec author or case-study name (per user instruction on 2026-06-05). They are short and professional: "Add ARCHITECTURE.md", "Add EVALUATION.md", "Add UNIT_TESTS.md". The doc files themselves describe the system without case-study branding.
 
 ## Environment State
 - OS: macOS (darwin)
@@ -334,9 +345,10 @@ print('flags:', r['verification_result']['flags'])
 - ChromaDB populated: NO (no global `chroma_db/`) — per-session corpora live at `chroma_db_sessions/session_<id>/`, gitignored
 - Verified imports: `langchain`, `chromadb`, `langgraph`, `langchain_google_genai` all import successfully
 - Test framework: `pytest` + `pytest-mock` (declared in `pyproject.toml` under `[dependency-groups].dev`)
-- Test status: 127 tests pass (74 guardrails + 24 memory + 29 verifier helpers) in <1s with no LLM calls
+- Test status: **127 tests pass in 0.45s** (74 guardrails + 24 memory + 29 verifier helpers) with no LLM calls. Verified via `unset VIRTUAL_ENV && uv run python -m pytest tests/ -q`.
 - Verified end-to-end: empty corpus → guardrail blocks; ingest 1 file → 12 chunks indexed; query → 1.00 confidence, 1 memory turn; reset session → collection deleted, corpus_size=0; query after reset → blocked again. All in a single per-session E2E test on 2026-06-05.
 - Live Streamlit instance: pid 14335; reachable at http://localhost:8765
+- Documentation: `ARCHITECTURE.md` (328 lines), `EVALUATION.md` (355 lines), `UNIT_TESTS.md` (341 lines) all in repo root, cross-linked from `README.md`
 
 ## File Change Log
 - 2026-06-03 CREATED `.env.example` — template for `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_EMBEDDING_MODEL`
@@ -414,6 +426,9 @@ print('flags:', r['verification_result']['flags'])
 - 2026-06-05 MODIFIED `ui/app.py` (commit `7f815eb`) — full rewrite. Per-session: `st.session_state.session_id` is a UUID4 12-char string; per-session `MemoryAgent` and per-session `chroma_db_sessions/session_<id>/` directory. Sidebar shows: session_id, memory turn count, corpus size, embedding backend info, `st.file_uploader` for PDF/DOCX/TXT/MD, "Index uploaded files" button (runs `safe_ingest_files`), indexed-files list, "Reset Session" button (calls `delete_collection` and regenerates session_id). Sample queries changed from HR-specific to generic ("Summarize the main points", "Compare the policies"). `load_dotenv(override=True)` confirmed. Streamlit on port 8765, pid 14335.
 - 2026-06-05 DELETED `docs/policy_hr.txt`, `docs/sop_onboarding.txt`, `docs/compliance_manual.txt` (and the `docs/` directory). These were the legacy hardcoded sample docs from US 1; the new per-session upload model means the user provides their own.
 - 2026-06-05 MODIFIED `.gitignore` — added `chroma_db_sessions/` (per-session corpora) alongside the existing `chroma_db/`.
+- 2026-06-05 CREATED `ARCHITECTURE.md` (commit `e629ed4`) — 328 lines. ASCII flow diagram, `AgentState` schema, 5-agent role breakdown, LangGraph design trade-offs, failure handling matrix, file map.
+- 2026-06-05 CREATED `EVALUATION.md` (commit `3ebce13`) — 355 lines. Input + output guardrails, RAG-Triad grounding details, confidence threshold rationale, failure-mode matrix, observability surface, confidence calibration notes, known limitations.
+- 2026-06-05 CREATED `UNIT_TESTS.md` (commit `d6d29e5`) — 341 lines. Per-test breakdown of 127 tests across 3 files, design principles, run commands, expected outcome, deliberate scope boundaries.
 
 ---
 
