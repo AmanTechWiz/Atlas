@@ -7,20 +7,29 @@ backends, switched via `EMBEDDING_BACKEND` in .env:
   - ollama   (default) — local, uses Ollama + nomic-embed-text
   - gemini             — Google Gemini embedding API
 
-Two entry points:
+Three public entry points:
 
 1. `safe_ingest_dir(docs_dir, persist_dir, collection_name, backend)` —
    ingest every supported file in a directory. Used by the CLI and by
-   dev-mode ingestion.
+   dev-mode ingestion. Full replace of the collection.
 
 2. `safe_ingest_files(file_paths, persist_dir, collection_name, backend)` —
-   ingest a specific list of file paths. Used by the Streamlit upload
-   UI to push user-uploaded files into a per-session collection without
-   writing them to disk in the `docs/` directory.
+   ingest a specific list of file paths. Full replace of the collection.
+   Used by the Streamlit upload UI when the user explicitly clicks
+   "Reset Session" + re-uploads.
 
-Both use the safe-swap pattern: build the new collection in a temp
-directory, verify the chunk count, then swap into place. The existing
-collection is left untouched if the embed step fails.
+3. `add_files_to_collection(file_paths, persist_dir, collection_name, backend)` —
+   append the given files' chunks to an existing (or new) collection.
+   Existing data is preserved. Used by the Streamlit upload UI for
+   the per-session "add another file" flow.
+
+Why no safe-swap: chromadb 1.5.x + langchain-chroma has a bug where
+`Chroma.from_documents` to a temp dir, followed by a rename into the
+final persist dir, leaves the HNSW index and SQLite metadata out of
+sync. Subsequent reads via `Chroma(persist_directory=...)` return 0
+even though the HNSW file is full. We avoid this by writing directly
+to the target persist dir via `Chroma.add_documents` (which both
+creates and appends safely).
 """
 
 from __future__ import annotations
@@ -28,7 +37,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import shutil
 import sys
 import warnings
 from pathlib import Path
@@ -180,6 +188,14 @@ def _get_embeddings(backend: str):
 
 
 def _count_in_dir(persist_dir: Path, embeddings, collection_name: str) -> int:
+    """Return the chunk count of `collection_name` at `persist_dir`, or 0.
+
+    Opens a fresh `Chroma` handle each call (no module-level caching)
+    so callers see the latest on-disk state. The previous safe-swap
+    flow was broken in chromadb 1.5.x — the SQLite+HNSW state would
+    fall out of sync after a rename. Writing directly to the target
+    persist dir (no swap) makes this call reliable.
+    """
     try:
         vs = Chroma(
             persist_directory=str(persist_dir),
@@ -191,11 +207,16 @@ def _count_in_dir(persist_dir: Path, embeddings, collection_name: str) -> int:
         return 0
 
 
-def _swap_into_place(temp_dir: Path, persist_dir: Path) -> None:
-    if persist_dir.exists():
-        shutil.rmtree(persist_dir)
-    temp_dir.rename(persist_dir)
-    log.info("Swapped %s into place.", persist_dir)
+def _open_collection(persist_dir: Path, embeddings, collection_name: str):
+    """Open (or create) a Chroma collection at `persist_dir` and return
+    the LangChain `Chroma` handle. Direct `add_documents` is the safe
+    write path that avoids the safe-swap rename bug."""
+    persist_dir.mkdir(parents=True, exist_ok=True)
+    return Chroma(
+        persist_directory=str(persist_dir),
+        embedding_function=embeddings,
+        collection_name=collection_name,
+    )
 
 
 def _report_chunk_counts(chunks: List[Document]) -> None:
@@ -219,9 +240,14 @@ def safe_ingest_files(
 ) -> int:
     """Ingest a specific list of files into a ChromaDB collection.
 
-    Used by the Streamlit upload UI for per-session ingestion. Uses the
-    safe-swap pattern (build in `persist_dir_new`, verify, swap).
-    Returns the number of chunks ingested.
+    Full replace of any existing collection at `persist_dir`. Writes
+    directly to the target dir via `Chroma.add_documents` (no safe-swap
+    rename) to avoid a chromadb 1.5.x bug where renamed HNSW indices
+    fall out of sync with SQLite metadata.
+
+    WARNING: this is a full replace. For the "add another file to the
+    existing corpus" use case (e.g. Streamlit upload), use
+    `add_files_to_collection` instead — it preserves existing data.
     """
     docs = load_documents_from_files(file_paths)
     chunks = split_documents(docs)
@@ -233,34 +259,68 @@ def safe_ingest_files(
     persist_dir = Path(persist_dir)
     persist_dir.mkdir(parents=True, exist_ok=True)
 
-    temp_dir = persist_dir.parent / f"{persist_dir.name}_new"
-    if temp_dir.exists():
-        shutil.rmtree(temp_dir)
-    temp_dir.mkdir(parents=True, exist_ok=True)
-
-    log.info("Building new collection in %s ...", temp_dir)
+    log.info("Replacing collection %s at %s ...", collection_name, persist_dir)
+    # Full replace: drop the existing collection (if any), then create
+    # it fresh and add the new chunks.
+    vs = _open_collection(persist_dir, embeddings, collection_name)
     try:
-        vectorstore = Chroma.from_documents(
-            documents=chunks,
-            embedding=embeddings,
-            persist_directory=str(temp_dir),
-            collection_name=collection_name,
-        )
+        vs.delete_collection()
     except Exception:
-        log.exception("Ingest failed during embedding. Existing data preserved.")
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        raise
+        pass
+    vs = _open_collection(persist_dir, embeddings, collection_name)
+    vs.add_documents(chunks)
+    _report_chunk_counts(chunks)
+    return len(chunks)
 
-    actual = _count_in_dir(temp_dir, embeddings, collection_name)
-    expected = len(chunks)
-    if actual < expected:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        raise RuntimeError(
-            f"Ingest produced {actual}/{expected} chunks — aborting, "
-            f"existing data at {persist_dir} preserved."
+
+def add_files_to_collection(
+    file_paths: List[Path],
+    persist_dir: Path,
+    collection_name: str,
+    backend: str,
+) -> int:
+    """Add the given files' chunks to an existing (or new) collection.
+
+    Appends new chunks via `Chroma.add_documents` if the collection
+    already exists; creates the collection fresh otherwise. Existing
+    data is preserved. Writes directly to `persist_dir` (no safe-swap
+    rename).
+
+    Returns the number of NEW chunks added (not the total in the
+    collection).
+
+    Used by the Streamlit upload UI for per-session ingestion. The
+    caller is responsible for invalidating any cached Chroma handle
+    after this function returns (e.g. by calling
+    `agents.retriever.set_active_collection`).
+    """
+    docs = load_documents_from_files(file_paths)
+    chunks = split_documents(docs)
+    if not chunks:
+        log.warning("No chunks to ingest.")
+        return 0
+
+    embeddings = _get_embeddings(backend)
+    persist_dir = Path(persist_dir)
+    persist_dir.mkdir(parents=True, exist_ok=True)
+
+    existing_count = _count_in_dir(persist_dir, embeddings, collection_name)
+    if existing_count > 0:
+        log.info(
+            "Collection %s already has %d chunk(s); appending %d new chunk(s).",
+            collection_name, existing_count, len(chunks),
         )
+        vs = _open_collection(persist_dir, embeddings, collection_name)
+        vs.add_documents(chunks)
+        _report_chunk_counts(chunks)
+        return len(chunks)
 
-    _swap_into_place(temp_dir, persist_dir)
+    log.info(
+        "Collection %s does not exist yet; creating it with %d chunk(s).",
+        collection_name, len(chunks),
+    )
+    vs = _open_collection(persist_dir, embeddings, collection_name)
+    vs.add_documents(chunks)
     _report_chunk_counts(chunks)
     return len(chunks)
 
@@ -273,8 +333,9 @@ def safe_ingest_dir(
 ) -> int:
     """Ingest every supported file in `docs_dir` into a ChromaDB collection.
 
-    Used by the CLI and by dev-mode ingestion. Returns the number of
-    chunks ingested. Uses the safe-swap pattern.
+    Full replace of any existing collection at `persist_dir`. Used by
+    the CLI and by dev-mode ingestion. Returns the number of chunks
+    ingested. Writes directly to `persist_dir` (no safe-swap rename).
     """
     docs = load_documents(docs_dir)
     chunks = split_documents(docs)
@@ -284,35 +345,16 @@ def safe_ingest_dir(
 
     embeddings = _get_embeddings(backend)
     persist_dir = Path(persist_dir)
+    persist_dir.mkdir(parents=True, exist_ok=True)
 
-    temp_dir = persist_dir.parent / f"{persist_dir.name}_new"
-    if temp_dir.exists():
-        shutil.rmtree(temp_dir)
-    temp_dir.mkdir(parents=True, exist_ok=True)
-
-    log.info("Building new collection in %s ...", temp_dir)
+    log.info("Replacing collection %s at %s ...", collection_name, persist_dir)
+    vs = _open_collection(persist_dir, embeddings, collection_name)
     try:
-        vectorstore = Chroma.from_documents(
-            documents=chunks,
-            embedding=embeddings,
-            persist_directory=str(temp_dir),
-            collection_name=collection_name,
-        )
+        vs.delete_collection()
     except Exception:
-        log.exception("Ingest failed during embedding. Existing data preserved.")
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        raise
-
-    actual = _count_in_dir(temp_dir, embeddings, collection_name)
-    expected = len(chunks)
-    if actual < expected:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        raise RuntimeError(
-            f"Ingest produced {actual}/{expected} chunks — aborting, "
-            f"existing data at {persist_dir} preserved."
-        )
-
-    _swap_into_place(temp_dir, persist_dir)
+        pass
+    vs = _open_collection(persist_dir, embeddings, collection_name)
+    vs.add_documents(chunks)
     _report_chunk_counts(chunks)
     return len(chunks)
 

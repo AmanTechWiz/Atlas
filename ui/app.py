@@ -68,7 +68,7 @@ try:
         get_corpus_size,
         set_active_collection,
     )
-    from vector_store.ingest import safe_ingest_files
+    from vector_store.ingest import add_files_to_collection, safe_ingest_files
 except Exception as _e:  # pragma: no cover
     _run_query = None
     MemoryAgent = None
@@ -76,6 +76,7 @@ except Exception as _e:  # pragma: no cover
     get_active_persist_dir = None
     get_corpus_size = None
     set_active_collection = None
+    add_files_to_collection = None
     safe_ingest_files = None
     _IMPORT_ERROR = repr(_e)
 else:
@@ -171,8 +172,14 @@ def reset_session() -> None:
 def _ingest_files_into_session(uploaded_files) -> tuple[bool, str]:
     """Write uploaded files to a per-session temp dir, ingest them into
     the session's collection, then clean up the temp dir. Returns
-    (success, message)."""
-    if not uploaded_files or safe_ingest_files is None:
+    (success, message).
+
+    Uses `add_files_to_collection` so existing chunks are preserved
+    when the user uploads additional files. After a successful ingest
+    the Retriever's cached vectorstore is invalidated so the next
+    query picks up the new data.
+    """
+    if not uploaded_files or add_files_to_collection is None:
         return False, "No files uploaded or ingest module unavailable."
 
     sid = st.session_state.session_id
@@ -191,9 +198,20 @@ def _ingest_files_into_session(uploaded_files) -> tuple[bool, str]:
             saved_paths.append(target)
 
         backend = os.getenv("EMBEDDING_BACKEND", "ollama").lower()
-        n = safe_ingest_files(saved_paths, persist_dir, collection_name, backend)
-        st.session_state.uploaded_filenames = sorted({p.name for p in saved_paths})
-        return True, f"Indexed {n} chunk(s) from {len(saved_paths)} file(s)."
+        n = add_files_to_collection(saved_paths, persist_dir, collection_name, backend)
+
+        existing = set(st.session_state.uploaded_filenames or [])
+        new = {p.name for p in saved_paths}
+        st.session_state.uploaded_filenames = sorted(existing | new)
+
+        if set_active_collection is not None:
+            set_active_collection(collection_name, persist_dir=persist_dir)
+
+        total = get_corpus_size() if get_corpus_size is not None else n
+        return True, (
+            f"Added {n} new chunk(s) from {len(saved_paths)} file(s). "
+            f"Corpus now has {total} chunk(s)."
+        )
     except FileNotFoundError as e:
         return False, f"Ingest failed — unsupported file type: {e}"
     except Exception as e:
