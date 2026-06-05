@@ -27,3 +27,4 @@ logs/*.json
 .vscode/
 *.swp
 
+chroma_db_sessions/

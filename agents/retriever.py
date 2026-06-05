@@ -54,7 +54,7 @@ load_dotenv(dotenv_path=str(Path(__file__).resolve().parent.parent / ".env"), ov
 log = logging.getLogger("retriever")
 
 PERSIST_DIR = Path(__file__).resolve().parent.parent / "chroma_db"
-COLLECTION_NAME = "enterprise_docs"
+DEFAULT_COLLECTION_NAME = "enterprise_docs"
 DEFAULT_K = 5
 
 MIN_RELEVANCE_OLLAMA = 0.50
@@ -67,6 +67,37 @@ MIN_RELEVANCE_GEMINI = 0.30
 _OLLAMA_EMBED_NORM_SQ = 520.0
 
 _vectorstore = None
+_active_persist_dir: Path = PERSIST_DIR
+_active_collection_name: str = DEFAULT_COLLECTION_NAME
+
+
+def set_active_collection(collection_name: str, persist_dir: Path = None) -> None:
+    """Switch the retriever to a different ChromaDB collection.
+
+    Used by the Streamlit UI to give each user session its own collection
+    (and optional persist directory) so uploaded documents are isolated
+    across sessions. After calling this, the next `retrieve()` call will
+    create a fresh Chroma handle pointing at the new collection.
+
+    Pass `persist_dir` to use a non-default directory (one per session).
+    When `persist_dir` is None, the default `./chroma_db/` is used.
+    """
+    global _active_persist_dir, _active_collection_name, _vectorstore
+    _active_persist_dir = Path(persist_dir) if persist_dir is not None else PERSIST_DIR
+    _active_collection_name = collection_name
+    _vectorstore = None
+    log.info(
+        "Retriever switched to collection=%s persist_dir=%s",
+        _active_collection_name, _active_persist_dir,
+    )
+
+
+def get_active_collection_name() -> str:
+    return _active_collection_name
+
+
+def get_active_persist_dir() -> Path:
+    return _active_persist_dir
 
 
 def _get_embeddings():
@@ -94,14 +125,15 @@ def _is_ollama() -> bool:
 def _get_vectorstore():
     global _vectorstore
     if _vectorstore is None:
-        if not PERSIST_DIR.exists():
+        if not _active_persist_dir.exists():
             raise FileNotFoundError(
-                f"ChromaDB not found at {PERSIST_DIR}. Run vector_store/ingest.py first."
+                f"ChromaDB not found at {_active_persist_dir}. "
+                f"Run vector_store/ingest.py first or upload documents via the UI."
             )
         _vectorstore = Chroma(
-            persist_directory=str(PERSIST_DIR),
+            persist_directory=str(_active_persist_dir),
             embedding_function=_get_embeddings(),
-            collection_name=COLLECTION_NAME,
+            collection_name=_active_collection_name,
         )
     return _vectorstore
 

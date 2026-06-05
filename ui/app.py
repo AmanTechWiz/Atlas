@@ -1,18 +1,36 @@
 """Streamlit UI for the Enterprise Knowledge Ops Agent.
 
-This is the UI shell for Official US 4 (Explainability & Transparency).
-The data shown in the 4 response tabs is currently a STUB
-(`stub_run_query`) so the user can validate the UX shape before the real
-backend is wired in. The stub is replaced by the real
-`graph.workflow.run_query` once US 1 lands.
+Wired to the real `graph.workflow.run_query` (Official US 1+2+3+4+5+6).
+
+Per-session behavior:
+- Each browser session gets a fresh `session_id` (UUID4).
+- Each session has its OWN ChromaDB collection (named `session_<id>`,
+  persisted to `chroma_db_sessions/<id>/`).
+- Each session has its OWN MemoryAgent (multi-turn conversations are
+  isolated across sessions).
+- "Reset Session" deletes the session's collection, regenerates the
+  session_id, and clears all in-memory state.
+
+File upload:
+- `st.file_uploader` accepts multiple PDF / DOCX / TXT / MD files.
+- Uploaded files are written to a per-session temp dir, ingested into
+  the session's collection, then the temp dir is cleaned up.
+- The user can re-upload to replace the session's corpus.
+
+Corpus-agnostic:
+- No hardcoded sample docs. The system starts with an empty corpus.
+- The input guardrail blocks queries until at least one document is
+  uploaded (per US 5 governance).
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
-import subprocess
-import sys
+import shutil
+import tempfile
+import uuid
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -30,131 +48,159 @@ warnings.filterwarnings(
 load_dotenv(dotenv_path=str(Path(__file__).resolve().parent.parent / ".env"), override=True)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-INGEST_SCRIPT = PROJECT_ROOT / "vector_store" / "ingest.py"
-PERSIST_DIR = PROJECT_ROOT / "chroma_db"
+SESSIONS_DIR = PROJECT_ROOT / "chroma_db_sessions"
 LOGS_DIR = PROJECT_ROOT / "logs"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+log = logging.getLogger("ui")
 
 STUB_ENABLED = False
 
 try:
-    from graph.workflow import run_query
+    from graph.workflow import run_query as _run_query
+    from agents.memory import MemoryAgent
+    from agents.retriever import (
+        get_active_collection_name,
+        get_active_persist_dir,
+        get_corpus_size,
+        set_active_collection,
+    )
+    from vector_store.ingest import safe_ingest_files
 except Exception as _e:  # pragma: no cover
-    run_query = None
+    _run_query = None
+    MemoryAgent = None
+    get_active_collection_name = None
+    get_active_persist_dir = None
+    get_corpus_size = None
+    set_active_collection = None
+    safe_ingest_files = None
     _IMPORT_ERROR = repr(_e)
 else:
     _IMPORT_ERROR = None
 
+UPLOAD_TYPES = ["pdf", "docx", "txt", "md"]
+MAX_UPLOAD_MB = 25
+
 SAMPLE_QUERIES = [
-    "What is the parental leave policy and how does it interact with the onboarding timeline for new parents in their first 30 days?",
-    "What are the MFA requirements and how quickly must a security incident be reported?",
-    "Compare the PTO policy with the sick leave policy. Which one carries over and which one does not?",
+    "Summarize the key points across the uploaded documents.",
+    "What is the most important policy or procedure described here?",
+    "Compare and contrast the requirements described in the documents.",
 ]
 
 
 def stub_run_query(query: str) -> dict[str, Any]:
-    chunks = [
-        {
-            "text": (
-                "Primary caregivers are entitled to 16 weeks of paid parental leave. "
-                "Secondary caregivers are entitled to 8 weeks of paid parental leave. "
-                "Parental leave must be taken within the first 12 months of the "
-                "child's birth or adoption."
-            ),
-            "source": "policy_hr.txt",
-            "page": 1,
-            "relevance_score": 0.89,
-        },
-        {
-            "text": (
-                "By the end of week 2, the new hire should be assigned a first "
-                "discrete project with clear success criteria and a target "
-                "completion date within the 30-day window."
-            ),
-            "source": "sop_onboarding.txt",
-            "page": 1,
-            "relevance_score": 0.81,
-        },
-        {
-            "text": (
-                "A 30-day check-in is held with the new hire, their manager, "
-                "and a People Ops representative. Feedback is captured in the HRIS."
-            ),
-            "source": "sop_onboarding.txt",
-            "page": 1,
-            "relevance_score": 0.74,
-        },
-        {
-            "text": (
-                "All full-time employees are expected to work a standard 40-hour "
-                "work week, typically scheduled as 8 hours per day, Monday through Friday."
-            ),
-            "source": "policy_hr.txt",
-            "page": 1,
-            "relevance_score": 0.42,
-        },
-    ]
     return {
         "query": query,
-        "plan": [
-            "[RETRIEVE] find parental leave policy in HR handbook",
-            "[RETRIEVE] find onboarding timeline and 30-day milestones",
-            "[ANALYZE] synthesize parental-leave entitlements with the 30-day onboarding flow",
-            "[VERIFY] check that every claim is grounded in a retrieved chunk",
-        ],
-        "retrieved_chunks": chunks,
-        "draft_answer": (
-            "Reasoning: The user is asking how ACME's parental leave policy interacts with the "
-            "onboarding timeline. The HR handbook (policy_hr.txt) gives the entitlements; the "
-            "onboarding SOP (sop_onboarding.txt) gives the 30-day milestones. Combining the two "
-            "produces a clear answer.\n\n"
-            "Answer: New parents at ACME are entitled to 16 weeks of paid parental leave "
-            "(primary caregivers) or 8 weeks (secondary caregivers). That leave can be taken any "
-            "time within the first 12 months of the child's birth or adoption. While on leave, "
-            "the parent is exempt from the standard 30-day onboarding milestones, but ACME's "
-            "onboarding SOP requires a 30-day check-in with the manager and People Ops after "
-            "their return.\n\n"
-            "Sources Used: policy_hr.txt (page 1), sop_onboarding.txt (page 1)"
-        ),
-        "verification_result": {
-            "confidence": 0.85,
-            "grounded": True,
-            "flags": [],
-        },
-        "final_answer": (
-            "New parents at ACME are entitled to **16 weeks of paid parental leave** "
-            "(primary caregivers) or **8 weeks** (secondary caregivers). That leave may be "
-            "taken at any point in the **first 12 months** after birth or adoption.\n\n"
-            "When a new parent returns from leave, ACME's onboarding SOP requires a "
-            "**30-day check-in** with the manager and People Ops. The standard 30-day onboarding "
-            "milestones (first project by end of week 2, 30-day check-in) are scheduled from the "
-            "employee's start date, not from their return-from-leave date — so HR and the manager "
-            "need to coordinate a tailored ramp-up plan."
-        ),
-        "decision_trace": [
-            "ORCHESTRATOR: parsed query, produced 4-step plan",
-            "RETRIEVER:   queried ChromaDB, returned 4 chunks from 2 sources (avg relevance 0.72)",
-            "ANALYST:     synthesized answer citing 2 of 4 chunks (policy_hr.txt, sop_onboarding.txt)",
-            "VERIFIER:    confidence=0.85, grounded=True, no flags raised",
-            "FINALIZE:    appended sources footer to draft answer",
-            "MEMORY:      stored Q&A in session history",
-        ],
-        "session_history": st.session_state.get("session_history", []),
-        "error": None,
+        "plan": ["[RETRIEVE] (stub)", "[ANALYZE] (stub)", "[VERIFY] (stub)"],
+        "retrieved_chunks": [],
+        "draft_answer": "(stub answer)",
+        "verification_result": {"confidence": 0.0, "grounded": False, "flags": ["STUB"]},
+        "final_answer": "Stub mode is enabled. Set STUB_ENABLED=False to use the real backend.",
+        "decision_trace": ["STUB: stub_run_query called"],
+        "session_history": [],
+        "error": "stub_mode",
+        "api_error": None,
+        "needs_disclaimer": False,
     }
 
 
-def confidence_badge(confidence: float) -> str:
-    if confidence >= 0.7:
-        color, label = "#1f9d55", "HIGH"
-    elif confidence >= 0.5:
-        color, label = "#b08800", "MEDIUM"
-    else:
-        color, label = "#c0392b", "LOW"
-    return (
-        f'<span style="background:{color};color:white;padding:4px 10px;'
-        f'border-radius:12px;font-weight:600;font-size:0.85em;">'
-        f"Confidence: {confidence:.2f} ({label})</span>"
-    )
+def _new_session_id() -> str:
+    return uuid.uuid4().hex[:12]
+
+
+def _session_persist_dir(session_id: str) -> Path:
+    return SESSIONS_DIR / f"session_{session_id}"
+
+
+def _session_collection_name(session_id: str) -> str:
+    return f"session_{session_id}"
+
+
+def _ensure_session_active() -> None:
+    """Make sure `st.session_state.session_id` is set AND the retriever
+    is pointed at this session's collection. Called on every render."""
+    if not st.session_state.get("session_id"):
+        st.session_state.session_id = _new_session_id()
+        st.session_state.memory = MemoryAgent(st.session_state.session_id) if MemoryAgent else None
+        st.session_state.uploaded_filenames = []
+        st.session_state.corpus_size_at_start = 0
+        st.session_state.ingest_message = ""
+
+    if set_active_collection is not None:
+        sid = st.session_state.session_id
+        target_dir = _session_persist_dir(sid)
+        target_coll = _session_collection_name(sid)
+        if get_active_collection_name() != target_coll:
+            set_active_collection(target_coll, persist_dir=target_dir)
+            log.info("UI bound to session=%s collection=%s", sid, target_coll)
+
+
+def reset_session() -> None:
+    """Delete the session's collection, generate a new session_id, clear state."""
+    if (
+        set_active_collection is not None
+        and get_active_collection_name is not None
+        and get_active_persist_dir is not None
+    ):
+        try:
+            from vector_store.ingest import delete_collection
+            delete_collection(
+                get_active_persist_dir(),
+                get_active_collection_name(),
+            )
+        except Exception as e:
+            log.warning("Reset: could not delete collection cleanly: %s", e)
+    st.session_state.session_id = _new_session_id()
+    st.session_state.memory = MemoryAgent(st.session_state.session_id) if MemoryAgent else None
+    st.session_state.uploaded_filenames = []
+    st.session_state.ingest_message = ""
+    st.session_state.corpus_size_at_start = 0
+    st.session_state.messages = []
+    st.session_state.session_history = []
+    st.session_state.last_result = None
+    if set_active_collection is not None:
+        set_active_collection(
+            _session_collection_name(st.session_state.session_id),
+            persist_dir=_session_persist_dir(st.session_state.session_id),
+        )
+
+
+def _ingest_files_into_session(uploaded_files) -> tuple[bool, str]:
+    """Write uploaded files to a per-session temp dir, ingest them into
+    the session's collection, then clean up the temp dir. Returns
+    (success, message)."""
+    if not uploaded_files or safe_ingest_files is None:
+        return False, "No files uploaded or ingest module unavailable."
+
+    sid = st.session_state.session_id
+    persist_dir = _session_persist_dir(sid)
+    collection_name = _session_collection_name(sid)
+    persist_dir.mkdir(parents=True, exist_ok=True)
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix=f"atlas_upload_{sid}_"))
+    saved_paths: list[Path] = []
+    try:
+        for uf in uploaded_files:
+            safe_name = Path(uf.name).name
+            target = tmp_dir / safe_name
+            with open(target, "wb") as f:
+                f.write(uf.getbuffer().tobytes())
+            saved_paths.append(target)
+
+        backend = os.getenv("EMBEDDING_BACKEND", "ollama").lower()
+        n = safe_ingest_files(saved_paths, persist_dir, collection_name, backend)
+        st.session_state.uploaded_filenames = sorted({p.name for p in saved_paths})
+        return True, f"Indexed {n} chunk(s) from {len(saved_paths)} file(s)."
+    except FileNotFoundError as e:
+        return False, f"Ingest failed — unsupported file type: {e}"
+    except Exception as e:
+        log.exception("Ingest failed")
+        return False, f"Ingest failed: {e}"
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def render_answer_tab(result: dict[str, Any]) -> None:
@@ -243,159 +289,103 @@ def render_agent_trace_tab(result: dict[str, Any]) -> None:
     v = result["verification_result"]
 
     if "grounding_confidence" in v:
-        st.markdown(
-            _score_badge_html("Grounding", v["grounding_confidence"])
-            + _score_badge_html("Answer Q.", v["answer_quality"])
-            + _score_badge_html("Retrieval", v["retrieval_confidence"]),
+        cols = st.columns(3)
+        cols[0].markdown(
+            _score_badge_html("Grounding", float(v.get("grounding_confidence") or 0)),
+            unsafe_allow_html=True,
+        )
+        cols[1].markdown(
+            _score_badge_html("Answer Q.", float(v.get("answer_quality") or 0)),
+            unsafe_allow_html=True,
+        )
+        cols[2].markdown(
+            _score_badge_html("Retrieval", float(v.get("retrieval_confidence") or 0)),
             unsafe_allow_html=True,
         )
 
+    st.markdown(f"- **confidence:** {v.get('confidence')}")
+    st.markdown(f"- **grounded:** {v.get('grounded')}")
     if v.get("flags"):
-        for f in v["flags"]:
-            st.warning(f"Flag: {f}")
-
+        st.markdown(f"- **flags:** {', '.join(v['flags'])}")
     claims = v.get("claims") or []
     if claims:
-        with st.expander(f"Claims ({len(claims)}) — per-claim support tags"):
-            for i, c in enumerate(claims, 1):
-                support = c.get("support", "unsupported")
-                color_map = {
-                    "direct": "#1f9d55",
-                    "reasonable_inference": "#5a9bd4",
-                    "absence_supported": "#b08800",
-                    "unsupported": "#c0392b",
-                    "contradicted": "#7b1fa2",
-                }
-                color = color_map.get(support, "#777")
-                st.markdown(
-                    f"**{i}.** "
-                    f'<span style="background:{color};color:white;padding:2px 8px;'
-                    f'border-radius:8px;font-size:0.75em;font-weight:600;">{support}</span> '
-                    f"_{c.get('claim', '')}_",
-                    unsafe_allow_html=True,
-                )
-                if c.get("source"):
-                    st.caption(f"source: `{c['source']}`")
-                if c.get("reason"):
-                    st.caption(f"why: {c['reason']}")
-
+        with st.expander(f"Claims ({len(claims)})"):
+            for c in claims:
+                tag = c.get("support", "?")
+                st.markdown(f"- **[{tag}]** {c.get('claim', '')}")
     aspects = v.get("question_aspects") or []
     if aspects:
-        with st.expander(f"Question aspects ({len(aspects)}) — what the answer actually covered"):
-            for i, a in enumerate(aspects, 1):
-                status = a.get("status", "not_answered")
-                color_map = {
-                    "answered": "#1f9d55",
-                    "partially_answered": "#b08800",
-                    "not_answered": "#c0392b",
-                }
-                color = color_map.get(status, "#777")
-                st.markdown(
-                    f"**{i}.** "
-                    f'<span style="background:{color};color:white;padding:2px 8px;'
-                    f'border-radius:8px;font-size:0.75em;font-weight:600;">{status}</span> '
-                    f"_{a.get('aspect', '')}_",
-                    unsafe_allow_html=True,
-                )
-                if a.get("reason"):
-                    st.caption(f"why: {a['reason']}")
-
+        with st.expander(f"Question aspects ({len(aspects)})"):
+            for a in aspects:
+                st.markdown(f"- **[{a.get('status', '?')}]** {a.get('aspect', '')}")
     with st.expander("Raw verification JSON"):
         st.json(v)
 
 
 def render_sources_tab(result: dict[str, Any]) -> None:
-    st.markdown("### Sources Used")
-    if not result["retrieved_chunks"]:
-        st.info("No sources retrieved.")
+    chunks = result["retrieved_chunks"]
+    if not chunks:
+        st.info("No sources were retrieved for this query.")
         return
-    for i, c in enumerate(result["retrieved_chunks"], 1):
-        st.markdown(
-            f"**{i}.** `{c['source']}` — page {c['page']} — "
-            f"relevance **{c['relevance_score']:.2f}**"
-        )
-        st.caption(c["text"][:300] + ("…" if len(c["text"]) > 300 else ""))
+    unique_sources = sorted({c["source"] for c in chunks})
+    st.markdown(f"**{len(unique_sources)}** source file(s) cited, **{len(chunks)}** chunk(s) total.")
+    for src in unique_sources:
+        with st.expander(f"`{src}`"):
+            for i, c in enumerate([c for c in chunks if c["source"] == src], 1):
+                st.markdown(
+                    f"**Chunk {i}** (page {c['page']}, relevance {c['relevance_score']:.2f})"
+                )
+                st.write(c["text"])
 
 
 def render_eval_log_tab(result: dict[str, Any]) -> None:
     log_path = result.get("log_path")
-    st.markdown("### On-Disk Evaluation Log")
-    if log_path:
-        st.caption(f"`{log_path}`")
-        try:
-            with open(log_path, "r", encoding="utf-8") as f:
-                entries = json.load(f)
-            st.success(f"Loaded {len(entries)} stage entries from disk.")
-
-            stages = [e.get("stage", "?") for e in entries]
-            st.markdown("**Timeline:** " + " → ".join(stages))
-
-            summary_idx = next(
-                (i for i, e in enumerate(entries) if e.get("stage") == "SUMMARY"), None
-            )
-            if summary_idx is not None:
-                with st.expander("Summary entry (executive overview)"):
-                    st.json(entries[summary_idx])
-
-            with st.expander("Full on-disk log (all stages, raw JSON)"):
-                st.json(entries)
-        except FileNotFoundError:
-            st.warning(f"Log file not found at `{log_path}`. Was the log directory moved?")
-        except json.JSONDecodeError as e:
-            st.error(f"Log file is not valid JSON: {e}")
-    else:
-        st.info("No `log_path` in result — this query was run outside `graph.workflow.run_query`.")
-
-    st.markdown("---")
-    st.markdown("### In-Memory State (live result)")
-    payload = {k: v for k, v in result.items() if k not in ("session_history", "eval_logger", "query_start_mono")}
-    with st.expander("In-memory state (raw Python dict)"):
-        st.json(payload)
-
-
-def run_ingest() -> tuple[bool, str]:
+    if not log_path or not Path(log_path).exists():
+        st.info("No evaluation log file was written for this query.")
+        return
     try:
-        result = subprocess.run(
-            [sys.executable, str(INGEST_SCRIPT)],
-            cwd=str(PROJECT_ROOT),
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
-        if result.returncode == 0:
-            n = 0
-            for line in result.stdout.splitlines():
-                if "total chunk" in line.lower():
-                    try:
-                        n = int(line.split()[0])
-                    except (ValueError, IndexError):
-                        n = 0
-            return True, f"Ingested {n} chunks." if n else "Ingestion completed."
-        return False, f"Ingestion failed (exit {result.returncode}).\n{result.stderr[-500:]}"
-    except subprocess.TimeoutExpired:
-        return False, "Ingestion timed out after 180s."
+        with open(log_path, "r", encoding="utf-8") as f:
+            entries = json.load(f)
+        st.markdown(f"**Log file:** `{log_path}`")
+        st.markdown(f"**Entries:** {len(entries)}")
+        for e in entries:
+            with st.expander(f"[{e['stage']}] {e['event']}  ·  {e['timestamp']}"):
+                st.json(e.get("data") or {})
     except Exception as e:
-        return False, f"Ingestion error: {e}"
+        st.error(f"Could not read log file: {e}")
 
 
-def init_session_state() -> None:
-    defaults = {
-        "messages": [],
-        "last_result": None,
-        "session_history": [],
-        "ingested": PERSIST_DIR.exists(),
-        "ingest_status": "",
-        "query_input": "",
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
+def confidence_badge(confidence: float) -> str:
+    if confidence >= 0.7:
+        color, label = "#1f9d55", "HIGH"
+    elif confidence >= 0.5:
+        color, label = "#b08800", "MEDIUM"
+    else:
+        color, label = "#c0392b", "LOW"
+    return (
+        f'<span style="background:{color};color:white;padding:6px 14px;'
+        f'border-radius:12px;font-weight:600;font-size:0.85em;">'
+        f"Confidence: {confidence:.2f} ({label})</span>"
+    )
 
 
 def render_sidebar() -> None:
     with st.sidebar:
         st.markdown("## Atlas")
         st.caption("Enterprise Knowledge Ops Agent")
+
+        sid = st.session_state.get("session_id", "?")
+        st.markdown(f"**Session ID:** `{sid}`")
+        memory_obj = st.session_state.get("memory")
+        if memory_obj is not None:
+            st.markdown(f"**Conversation turns in memory:** {len(memory_obj)}")
+        corpus_size = 0
+        if get_corpus_size is not None:
+            try:
+                corpus_size = get_corpus_size()
+            except Exception:
+                corpus_size = 0
+        st.markdown(f"**Chunks in corpus:** {corpus_size}")
 
         st.markdown("### Model Info")
         llm = os.getenv("GEMINI_MODEL", "not set")
@@ -409,23 +399,37 @@ def render_sidebar() -> None:
         st.markdown(f"- **LLM:** `{llm}`")
         st.markdown(f"- **Embeddings:** {emb_display}")
 
-        st.markdown("### Actions")
-        if st.button("Ingest Documents", use_container_width=True):
-            with st.spinner("Running vector_store/ingest.py ..."):
-                ok, msg = run_ingest()
-            st.session_state.ingested = ok
-            st.session_state.ingest_status = msg
+        st.markdown("### Upload Documents")
+        st.caption(
+            "Upload PDF, DOCX, TXT, or MD files. They are indexed into "
+            f"this session's private collection (max {MAX_UPLOAD_MB} MB per file)."
+        )
+        uploaded = st.file_uploader(
+            "Choose files",
+            type=UPLOAD_TYPES,
+            accept_multiple_files=True,
+            key=f"uploader_{sid}",
+        )
+        if uploaded and st.button("Index uploaded files", use_container_width=True):
+            with st.spinner(f"Embedding {len(uploaded)} file(s) into session collection..."):
+                ok, msg = _ingest_files_into_session(uploaded)
+            st.session_state.ingest_message = msg
             st.toast(msg, icon="✅" if ok else "❌")
+            st.rerun()
 
+        if st.session_state.get("ingest_message"):
+            (st.success if corpus_size > 0 else st.error)(st.session_state.ingest_message)
+
+        if st.session_state.get("uploaded_filenames"):
+            st.markdown("**Indexed in this session:**")
+            for name in st.session_state.uploaded_filenames:
+                st.markdown(f"- `{name}`")
+
+        st.markdown("### Actions")
         if st.button("Reset Session", use_container_width=True):
-            st.session_state.messages = []
-            st.session_state.last_result = None
-            st.session_state.session_history = []
-            st.toast("Session reset.", icon="🔄")
-
-        if st.session_state.get("ingest_status"):
-            status = st.session_state.ingest_status
-            (st.success if st.session_state.ingested else st.error)(status)
+            reset_session()
+            st.toast("Session reset — fresh session_id and empty corpus.", icon="🔄")
+            st.rerun()
 
         st.markdown("### Session History")
         if not st.session_state.session_history:
@@ -441,8 +445,9 @@ def render_sidebar() -> None:
 def render_main() -> None:
     st.title("Atlas — Enterprise Knowledge Ops Agent")
     st.markdown(
-        "Ask complex questions across your enterprise documents. "
-        "The answer is grounded in the source corpus and verified before being shown."
+        "Upload your enterprise documents in the sidebar, then ask complex "
+        "questions across them. The answer is grounded in your uploaded "
+        "corpus and verified before being shown."
     )
 
     if STUB_ENABLED or _IMPORT_ERROR:
@@ -451,15 +456,22 @@ def render_main() -> None:
             msg += " (STUB_ENABLED=True)"
         if _IMPORT_ERROR:
             msg += f" — backend import failed: `{_IMPORT_ERROR}`"
-        msg += ". The real US 1 backend will replace the stub in a future step."
+        msg += ". The real backend will replace the stub when imports succeed."
         st.warning(msg)
+
+    if not st.session_state.get("uploaded_filenames"):
+        st.info(
+            "**Getting started:** Use the **Upload Documents** panel in the sidebar "
+            "to add at least one PDF, DOCX, or TXT file. Once indexed, the guardrail "
+            "will allow queries and you can ask questions across the uploaded corpus."
+        )
 
     st.markdown("### Try a sample query")
     cols = st.columns(len(SAMPLE_QUERIES))
     for col, sample in zip(cols, SAMPLE_QUERIES):
         if col.button(
             sample[:55] + ("…" if len(sample) > 55 else ""),
-            key=f"sample_{sample[:10]}",
+            key=f"sample_{sample[:10]}_{st.session_state.session_id}",
             use_container_width=True,
         ):
             st.session_state.query_input = sample
@@ -468,18 +480,22 @@ def render_main() -> None:
     st.text_input(
         "Your query:",
         key="query_input",
-        placeholder="e.g., What is the parental leave policy?",
+        placeholder="e.g., Summarize the key points in the uploaded documents.",
         label_visibility="collapsed",
     )
     ask = st.button("Ask", type="primary", use_container_width=False)
 
     if ask and st.session_state.query_input.strip():
         query = st.session_state.query_input
-        with st.spinner("Running agent pipeline (orchestrate → retrieve → analyze → verify → finalize)..."):
-            if STUB_ENABLED or run_query is None:
+        memory_obj = st.session_state.get("memory")
+        with st.spinner(
+            "Running agent pipeline (orchestrate → retrieve → analyze → verify → "
+            "finalize → memory)..."
+        ):
+            if STUB_ENABLED or _run_query is None:
                 result = stub_run_query(query)
             else:
-                result = run_query(query)
+                result = _run_query(query, memory=memory_obj)
         st.session_state.last_result = result
         st.session_state.messages.append({"role": "user", "content": query})
         st.session_state.session_history.append(
@@ -512,7 +528,19 @@ def main() -> None:
         page_icon="🧭",
         layout="wide",
     )
-    init_session_state()
+
+    defaults = {
+        "messages": [],
+        "last_result": None,
+        "session_history": [],
+        "query_input": "",
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+    _ensure_session_active()
+
     render_sidebar()
     render_main()
 
