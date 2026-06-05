@@ -146,3 +146,20 @@ def retrieve(query: str, k: int = DEFAULT_K) -> List[Dict[str, Any]]:
             c["source"], c["page"], c["relevance_score"], c["_distance"],
         )
     return chunks
+
+
+def get_corpus_size() -> int:
+    """Return the number of chunks in the active ChromaDB collection.
+
+    Returns 0 when the collection does not exist yet (no documents ingested)
+    or when the read fails for any reason. Used by the input guardrail to
+    block queries when the corpus is empty.
+    """
+    try:
+        vs = _get_vectorstore()
+        return int(vs._collection.count() or 0)
+    except FileNotFoundError:
+        return 0
+    except Exception as e:
+        log.warning("Could not read corpus size: %s", e)
+        return 0

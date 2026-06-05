@@ -11,11 +11,14 @@ Official US 1+2+3+5 flow:
                               \                     /
                                `-> finalize <-'
                                        |
+                                  memory_node
+                                       |
                                       END
 
 US 1: real RAG pipeline (orchestrate, retrieve, analyze, finalize).
 US 2: every node calls EvalLogger to write a structured JSON entry
-      to logs/eval_<session_id>.json.
+      to logs/eval_<session_id>.json. MemoryAgent is part of the
+      architecture; its node is the last step in the flow.
 US 3: real Verifier node replaces the stub verification_result.
       Conditional edge adds a low-confidence disclaimer to the
       final answer when the Verifier's confidence is < 0.6.
@@ -47,8 +50,9 @@ from langgraph.graph import END, START, StateGraph
 
 from agents._api_errors import friendly_api_error
 from agents.analyst import analyze
+from agents.memory import MemoryAgent
 from agents.orchestrator import plan
-from agents.retriever import retrieve
+from agents.retriever import get_corpus_size, retrieve
 from agents.verifier import verify
 from evaluation.logger import EvalLogger
 from guardrails.checks import apply_confidence_guardrail, validate_input
@@ -74,6 +78,7 @@ class AgentState(TypedDict, total=False):
     needs_disclaimer: bool
     eval_logger: EvalLogger
     query_start_mono: float
+    memory: MemoryAgent
 
 
 def _trace(state: AgentState, line: str) -> List[str]:
@@ -93,13 +98,15 @@ def _get_logger(state: AgentState) -> Optional[EvalLogger]:
 def orchestrate_node(state: AgentState) -> Dict[str, Any]:
     elog = _get_logger(state)
     try:
-        plan_steps = plan(state["query"], session_context="")
+        memory = state.get("memory")
+        session_context = memory.get_context() if memory is not None else ""
+        plan_steps = plan(state["query"], session_context=session_context)
         if elog is not None:
             elog.log_plan(plan_steps)
         return _ok_node(
             state, "ORCHESTRATOR",
             {"plan": plan_steps},
-            f"produced {len(plan_steps)}-step plan",
+            f"produced {len(plan_steps)}-step plan (memory: {len(memory) if memory else 0} turn(s))",
         )
     except Exception as e:
         log.exception("Orchestrator failed")
@@ -256,6 +263,33 @@ def finalize_node(state: AgentState) -> Dict[str, Any]:
     )
 
 
+def memory_node(state: AgentState) -> Dict[str, Any]:
+    """Append the just-completed turn to the session memory.
+
+    US 2 (Memory Agent) — invoked at the END of the graph (after finalize).
+    Reads `final_answer`, `retrieved_chunks`, and `query` from state, then
+    appends a (query, answer, sources) entry to the MemoryAgent. Subsequent
+    calls to `run_query()` within the same session will inject this history
+    into the Orchestrator's planning step.
+    """
+    memory = state.get("memory")
+    if memory is None:
+        return _ok_node(
+            state, "MEMORY",
+            {},
+            "skipped — no memory instance in state",
+        )
+    chunks = state.get("retrieved_chunks") or []
+    sources = sorted({c.get("source", "unknown") for c in chunks})
+    final_answer = state.get("final_answer", "") or ""
+    memory.add(state.get("query", ""), final_answer, sources)
+    return _ok_node(
+        state, "MEMORY",
+        {"session_history": memory.history},
+        f"appended turn {len(memory)} ({len(sources)} source(s) cited)",
+    )
+
+
 def build_graph():
     g = StateGraph(AgentState)
     g.add_node("orchestrate", orchestrate_node)
@@ -264,6 +298,7 @@ def build_graph():
     g.add_node("verify", verify_node)
     g.add_node("low_confidence", low_confidence_node)
     g.add_node("finalize", finalize_node)
+    g.add_node("memory", memory_node)
     g.add_edge(START, "orchestrate")
     g.add_edge("orchestrate", "retrieve")
     g.add_edge("retrieve", "analyze")
@@ -274,14 +309,25 @@ def build_graph():
         {"low_confidence": "low_confidence", "finalize": "finalize"},
     )
     g.add_edge("low_confidence", "finalize")
-    g.add_edge("finalize", END)
+    g.add_edge("finalize", "memory")
+    g.add_edge("memory", END)
     return g.compile()
 
 
 app = build_graph()
 
 
-def run_query(query: str) -> AgentState:
+def _get_corpus_size() -> int:
+    """Return the number of chunks in the active ChromaDB collection.
+
+    Used by the input guardrail to reject queries against an empty corpus.
+    Returns 0 on any failure (missing collection, missing dep, etc.) — the
+    guardrail will then ask the user to upload a document.
+    """
+    return get_corpus_size()
+
+
+def run_query(query: str, memory: Optional[MemoryAgent] = None) -> AgentState:
     """Run the full US 1+2+3+5 pipeline. Returns the populated AgentState.
 
     Side effect: writes a structured JSON log to logs/eval_<session_id>.json
@@ -291,11 +337,20 @@ def run_query(query: str) -> AgentState:
     skipped. The rejection reason is returned in `final_answer` and a
     `GUARDRAIL` entry is written to the log file. SUMMARY is NOT written
     in that case (no real query to summarize).
+
+    `corpus_size` is passed to the guardrail so it can reject queries when
+    the user has not yet uploaded any documents.
+
+    `memory` is an optional MemoryAgent. If provided, the orchestrator
+    receives prior session context (US 2 Memory Agent) and the turn is
+    appended to memory at the end of the run. Reuse the same MemoryAgent
+    instance across calls for multi-turn conversations.
     """
     eval_logger = EvalLogger()
     eval_logger.log_query_start(query)
 
-    guard = validate_input(query)
+    corpus_size = _get_corpus_size()
+    guard = validate_input(query, corpus_size=corpus_size)
     if not guard["valid"]:
         eval_logger.log_guardrail_rejection(query, guard["reason"])
         rejection_message = (
@@ -344,6 +399,7 @@ def run_query(query: str) -> AgentState:
         "needs_disclaimer": False,
         "eval_logger": eval_logger,
         "query_start_mono": time.monotonic(),
+        "memory": memory,
     }
     result = app.invoke(initial)
     result["log_path"] = str(eval_logger.log_path)

@@ -2,13 +2,21 @@
 
 Satisfies Official US 5 (Governance & Guardrails) and Story 8 of agents.md.
 
+The guardrails are CORPUS-AGNOSTIC — they do not assume the user has uploaded
+HR/compliance/onboarding documents. They run basic safety checks (length,
+injection detection, coherence, spam) that apply to any enterprise document
+set (legal, finance, IT, HR, operations, etc.).
+
 Two public functions:
 
-- `validate_input(query)` - run BEFORE the graph to reject:
+- `validate_input(query, corpus_size=0)` - run BEFORE the graph to reject:
     * empty / None queries
-    * queries shorter than 5 characters
+    * queries shorter than `MIN_QUERY_LENGTH` characters
+    * queries longer than `MAX_QUERY_LENGTH` characters
+    * queries with > `MAX_SPECIAL_CHAR_RATIO` non-alphanumeric characters
+    * queries with > `MAX_REPETITION_RATIO` repeated tokens
     * queries containing common prompt-injection patterns
-    * queries that have no enterprise-document topic keywords (out of scope)
+    * queries against an empty corpus (corpus_size=0)
 
   Returns `{"valid": bool, "reason": str}`. When `valid=False`, the graph
   should not run; `run_query()` returns early with a friendly rejection in
@@ -30,6 +38,9 @@ from typing import Any, Dict, List
 
 
 MIN_QUERY_LENGTH = 5
+MAX_QUERY_LENGTH = 2000
+MAX_SPECIAL_CHAR_RATIO = 0.50
+MAX_REPETITION_RATIO = 0.60
 
 INJECTION_PATTERNS: List[str] = [
     r"ignore (?:all )?(?:previous|prior|above) instructions",
@@ -46,40 +57,42 @@ INJECTION_PATTERNS: List[str] = [
     r"\bjailbreak\b",
     r"\bDAN\b",
     r"\bdeveloper mode\b",
-    r"bypass (?:safety|guardrail|filter|restriction)",
-    r"override (?:safety|guardrail|filter|restriction)",
+    r"bypass (?:[^.\n]{0,30})?(?:safety|guardrail|filter|restriction)",
+    r"override (?:[^.\n]{0,30})?(?:safety|guardrail|filter|restriction)",
     r"reveal (?:your|the) (?:system|hidden) prompt",
     r"show (?:your|the) (?:system|hidden) prompt",
-]
-
-ENTERPRISE_KEYWORDS: List[str] = [
-    "policy", "policies", "handbook", "manual", "procedure", "sop",
-    "compliance", "audit", "regulatory", "governance",
-    "security", "secure", "mfa", "2fa", "two-factor", "password", "encryption",
-    "access", "permission", "authorization", "authentication",
-    "data", "retention", "privacy", "confidential", "pii",
-    "training", "vendor", "third-party", "third party",
-    "employee", "employees", "staff", "worker", "personnel", "hr",
-    "human resources", "manager", "supervisor", "team lead",
-    "leave", "pto", "vacation", "holiday", "sick", "bereavement",
-    "parental", "maternity", "paternity", "fmla",
-    "attendance", "conduct", "dress code", "dress", "benefit", "benefits",
-    "compensation", "salary", "wage", "payroll", "bonus",
-    "onboarding", "onboard", "hire", "hired", "newhire", "new hire",
-    "orientation", "first day", "first week", "first 30 days",
-    "equipment", "laptop", "workstation", "workspace",
-    "mentor", "mentorship", "buddy",
-    "company", "organization", "organisation", "enterprise", "corporate",
-    "deadline", "requirement", "mandatory", "must", "shall",
-    "approval", "approve", "approved", "sign-off", "signoff",
-    "incident", "breach", "violation",
+    r"\bprompt\s+injection\b",
+    r"execute (?:the following|this) (?:code|script|command)",
+    r"\bcurl\s+[^\s]+\s*\|\s*sh",
 ]
 
 _INJECTION_RE = re.compile("|".join(f"(?:{p})" for p in INJECTION_PATTERNS), re.IGNORECASE)
-_KEYWORDS_RE = re.compile(
-    r"\b(" + "|".join(re.escape(k) for k in ENTERPRISE_KEYWORDS) + r")\b",
-    re.IGNORECASE,
-)
+
+_ALNUM_RE = re.compile(r"[A-Za-z0-9]")
+_WORD_RE = re.compile(r"[A-Za-z]{3,}")
+_WS_RE = re.compile(r"\s+")
+
+
+def _special_char_ratio(text: str) -> float:
+    if not text:
+        return 0.0
+    alnum = len(_ALNUM_RE.findall(text))
+    ws = len(_WS_RE.findall(text))
+    meaningful = alnum + ws
+    if meaningful == 0:
+        return 1.0
+    return 1.0 - (meaningful / len(text))
+
+
+def _repetition_ratio(text: str) -> float:
+    words = _WORD_RE.findall(text.lower())
+    if len(words) < 3:
+        return 0.0
+    counts: Dict[str, int] = {}
+    for w in words:
+        counts[w] = counts.get(w, 0) + 1
+    most_common_count = max(counts.values())
+    return most_common_count / len(words)
 
 
 DISCLAIMER = (
@@ -89,12 +102,16 @@ DISCLAIMER = (
 )
 
 
-def validate_input(query: Any) -> Dict[str, str]:
+def validate_input(query: Any, corpus_size: int = 0) -> Dict[str, str]:
     """Validate a user query before it enters the graph.
 
     Returns `{"valid": bool, "reason": str}`. `reason` is a short
     human-readable explanation of why the query was rejected (empty
     string when valid).
+
+    `corpus_size` is the number of chunks currently in the user's vector
+    store. A value of 0 means no documents have been uploaded yet, in
+    which case the query is rejected with a request to upload documents.
     """
     if query is None:
         return {"valid": False, "reason": "Query is empty."}
@@ -103,11 +120,38 @@ def validate_input(query: Any) -> Dict[str, str]:
     cleaned = query.strip()
     if not cleaned:
         return {"valid": False, "reason": "Query is empty."}
+
     if len(cleaned) < MIN_QUERY_LENGTH:
         return {
             "valid": False,
             "reason": f"Query is too short (need at least {MIN_QUERY_LENGTH} characters).",
         }
+    if len(cleaned) > MAX_QUERY_LENGTH:
+        return {
+            "valid": False,
+            "reason": f"Query is too long (max {MAX_QUERY_LENGTH} characters).",
+        }
+
+    special_ratio = _special_char_ratio(cleaned)
+    if special_ratio > MAX_SPECIAL_CHAR_RATIO:
+        return {
+            "valid": False,
+            "reason": (
+                "Query contains too many special characters (likely spam or "
+                "garbled text). Please rephrase as a plain business question."
+            ),
+        }
+
+    rep_ratio = _repetition_ratio(cleaned)
+    if rep_ratio > MAX_REPETITION_RATIO:
+        return {
+            "valid": False,
+            "reason": (
+                "Query contains excessive repetition. Please rephrase as a "
+                "clear, distinct question."
+            ),
+        }
+
     if _INJECTION_RE.search(cleaned):
         return {
             "valid": False,
@@ -116,15 +160,17 @@ def validate_input(query: Any) -> Dict[str, str]:
                 "Please rephrase as a plain business question."
             ),
         }
-    if not _KEYWORDS_RE.search(cleaned):
+
+    if corpus_size <= 0:
         return {
             "valid": False,
             "reason": (
-                "Query does not appear to be related to enterprise documents "
-                "(HR, compliance, onboarding, or policy topics). Please ask a "
-                "question about company policies, procedures, or compliance."
+                "Your knowledge base is empty. Please upload at least one "
+                "document (PDF, DOCX, or TXT) using the sidebar before "
+                "asking a question."
             ),
         }
+
     return {"valid": True, "reason": ""}
 
 
