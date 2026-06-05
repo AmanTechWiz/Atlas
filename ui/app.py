@@ -163,8 +163,14 @@ def render_answer_tab(result: dict[str, Any]) -> None:
     grounded = bool(v.get("grounded", False))
     flags = v.get("flags", []) or []
     api_error = result.get("api_error")
+    error = result.get("error") or ""
+    guardrail_rejected = error.startswith("guardrail_rejected")
 
-    if api_error:
+    if guardrail_rejected:
+        reason = error.split("guardrail_rejected: ", 1)[-1]
+        st.error(f"**Input guardrail rejected this query** — {reason}")
+        st.caption("The pipeline did not run. Rephrase the query and try again.")
+    elif api_error:
         st.error(f"**Service unavailable** — {api_error}")
         st.caption("The Agent Trace tab shows which stage failed. The low-confidence "
                    "banner is suppressed because the cause is an upstream API failure, "
@@ -181,7 +187,7 @@ def render_answer_tab(result: dict[str, Any]) -> None:
             f"See the Agent Trace tab for details."
         )
 
-    if not api_error:
+    if not api_error and not guardrail_rejected:
         st.markdown(confidence_badge(confidence), unsafe_allow_html=True)
     st.markdown("### Final Answer")
     st.markdown(result["final_answer"])

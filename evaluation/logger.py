@@ -3,7 +3,7 @@
 Each query produces a single JSON file at logs/eval_<session_id>.json
 containing an array of timestamped entries. Each entry has:
     - timestamp (ISO 8601 UTC)
-    - stage (QUERY_START | ORCHESTRATION | RETRIEVAL | ANALYSIS | VERIFICATION | FINAL | FAILURE | SUMMARY)
+    - stage (QUERY_START | ORCHESTRATION | RETRIEVAL | ANALYSIS | VERIFICATION | FINAL | FAILURE | GUARDRAIL | SUMMARY)
     - event (one-line human-readable description)
     - data (stage-specific payload)
 
@@ -150,6 +150,13 @@ class EvalLogger:
             "FAILURE",
             f"stage={stage} — {error}",
             {"error": error, "stage": stage},
+        )
+
+    def log_guardrail_rejection(self, query: str, reason: str) -> None:
+        self._append(
+            "GUARDRAIL",
+            f"query rejected by input validation: {reason}",
+            {"query": query, "reason": reason, "rejected": True},
         )
 
     def log_summary(

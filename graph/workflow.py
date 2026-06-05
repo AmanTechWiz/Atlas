@@ -1,6 +1,6 @@
 """LangGraph workflow wiring all agents together.
 
-Official US 1+2+3 flow:
+Official US 1+2+3+5 flow:
   START -> orchestrate -> retrieve -> analyze -> verify
                                                   |
                                   confidence < 0.6 ?
@@ -19,9 +19,12 @@ US 2: every node calls EvalLogger to write a structured JSON entry
 US 3: real Verifier node replaces the stub verification_result.
       Conditional edge adds a low-confidence disclaimer to the
       final answer when the Verifier's confidence is < 0.6.
-
-US 5 will insert Guardrails before `orchestrate`. The current graph
-is the US 1+2+3 vertical slice.
+US 5: input guardrail runs BEFORE the graph (`validate_input` in
+      `guardrails.checks`); if it rejects, the graph is skipped and
+      the rejection reason is returned in `final_answer`. Output
+      guardrail (`apply_confidence_guardrail` in `guardrails.checks`)
+      runs INSIDE `finalize_node` to wrap the answer with the
+      low-confidence disclaimer and the sources footer.
 """
 
 from __future__ import annotations
@@ -48,18 +51,13 @@ from agents.orchestrator import plan
 from agents.retriever import retrieve
 from agents.verifier import verify
 from evaluation.logger import EvalLogger
+from guardrails.checks import apply_confidence_guardrail, validate_input
 
 load_dotenv(dotenv_path=str(Path(__file__).resolve().parent.parent / ".env"), override=True)
 
 log = logging.getLogger("workflow")
 
 CONFIDENCE_THRESHOLD = 0.6
-
-DISCLAIMER = (
-    "**Low confidence — answer may not be fully supported by the source "
-    "documents.** Treat the information above as provisional and verify "
-    "against the cited sources before acting on it."
-)
 
 
 class AgentState(TypedDict, total=False):
@@ -227,17 +225,13 @@ def finalize_node(state: AgentState) -> Dict[str, Any]:
     api_error = state.get("api_error")
     draft = state.get("draft_answer", "")
     chunks = state.get("retrieved_chunks") or []
+    verification = state.get("verification_result") or {}
     answer_body = _extract_answer_section(draft)
 
-    if chunks:
-        unique_sources = sorted({c["source"] for c in chunks})
-        footer = "\n\n---\n**Sources:** " + " · ".join(f"`{s}`" for s in unique_sources)
-    else:
-        footer = "\n\n---\n**Sources:** (none — no relevant chunks were retrieved)"
+    if not verification and state.get("needs_disclaimer"):
+        verification = {"confidence": 0.0}
 
-    body = answer_body + footer
-    if state.get("needs_disclaimer") and not api_error:
-        body = DISCLAIMER + "\n\n" + body
+    body = apply_confidence_guardrail(verification, answer_body, chunks)
 
     if api_error:
         body = (
@@ -288,13 +282,53 @@ app = build_graph()
 
 
 def run_query(query: str) -> AgentState:
-    """Run the full US 1+2+3 pipeline. Returns the populated AgentState.
+    """Run the full US 1+2+3+5 pipeline. Returns the populated AgentState.
 
     Side effect: writes a structured JSON log to logs/eval_<session_id>.json
     with one entry per agent stage plus a final SUMMARY entry.
+
+    US 5 guardrail: if `validate_input(query)` rejects, the graph is
+    skipped. The rejection reason is returned in `final_answer` and a
+    `GUARDRAIL` entry is written to the log file. SUMMARY is NOT written
+    in that case (no real query to summarize).
     """
     eval_logger = EvalLogger()
     eval_logger.log_query_start(query)
+
+    guard = validate_input(query)
+    if not guard["valid"]:
+        eval_logger.log_guardrail_rejection(query, guard["reason"])
+        rejection_message = (
+            f"**Query rejected by input guardrail.**\n\n"
+            f"{guard['reason']}\n\n"
+            f"Please rephrase your question and try again."
+        )
+        result: AgentState = {
+            "query": query,
+            "plan": [],
+            "retrieved_chunks": [],
+            "draft_answer": "",
+            "verification_result": {},
+            "final_answer": rejection_message,
+            "decision_trace": [
+                f"GUARDRAIL: query rejected — {guard['reason']}"
+            ],
+            "session_history": [],
+            "error": f"guardrail_rejected: {guard['reason']}",
+            "api_error": None,
+            "needs_disclaimer": False,
+            "eval_logger": eval_logger,
+            "query_start_mono": time.monotonic(),
+        }
+        elapsed_ms = 0.0
+        eval_logger.log_final(rejection_message, elapsed_ms)
+        result["log_path"] = str(eval_logger.log_path)
+        log.info(
+            "run_query guardrail-rejected: reason=%s, log=%s",
+            guard["reason"],
+            eval_logger.log_path,
+        )
+        return result
 
     initial: AgentState = {
         "query": query,
