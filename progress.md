@@ -15,7 +15,7 @@ writing a single line of code:
 ---
 
 ## Last Updated
-2026-06-04 — **Official US 4 (Explainability & Transparency) is COMPLETE.** All 4 Streamlit tabs (Answer / Agent Trace / Sources / Evaluation Log) wired to the real `run_query()` output; Agent Trace tab shows plan + decision_trace + chunks + draft + verification result + a color-coded confidence badge; Evaluation Log tab reads the on-disk `logs/eval_<id>.json` file directly so a user can see the raw audit trail. New EvalLogger fields (claims, aspects, 3-axis confidence) + new "Service unavailable" banner when the LLM provider is rate-limited or returns 404. Per rule #0a, the scope of this US also includes several US 6 (Eval/Observability) advancements done in the same commit cycle: RAG-Triad verifier (claims/aspects/3-axis confidence) + 29 unit tests + refusal-detection flag + retriever pseudo-cosine fix. Next up: US 5 (Governance & Guardrails) or US 6 (remaining failure-detection sweep) — awaiting user pick.
+2026-06-05 — **Official US 5 (Governance & Guardrails) is COMPLETE.** `guardrails/checks.py` exposes a corpus-agnostic `validate_input()` (length, special-char ratio, repetition, 19 prompt-injection patterns, empty-corpus block) and `apply_confidence_guardrail()` (low-confidence disclaimer + sources footer). Wired into `graph/workflow.py` — input check runs before the graph, output check runs inside `finalize_node`. EvalLogger gains a `GUARDRAIL` stage for rejections. The same cycle also delivered the Memory Agent (`agents/memory.py`), a per-session ChromaDB collection, DOCX support, and a UI file uploader — all part of the broader "fully agentic" hardening pass requested by the user. 127 deterministic tests pass in <1s (74 guardrails + 24 memory + 29 verifier helpers). **Next up:** the 3 missing documentation deliverables (`ARCHITECTURE.md`, `EVALUATION.md`, `UNIT_TESTS.md`) — explicit deliverable from the project spec — then a final pass on US 6's remaining "conflicting agent outputs" detection.
 
 ## Implementation Status (13 internal stories)
 - [x] Story 0  — Environment Setup
@@ -23,22 +23,22 @@ writing a single line of code:
 - [x] Story 2  — RetrieverAgent
 - [x] Story 3  — AnalystAgent
 - [x] Story 4  — VerifierAgent (real grounding check + deterministic post-process for Gemini calibration)
+- [x] Story 5  — MemoryAgent (per-session conversation memory, `get_context()` injected into Orchestrator's planning step, `memory_node` wired into LangGraph)
 - [x] Story 6  — OrchestratorAgent
-- [x] Story 7  — LangGraph Workflow (US 1+2+3 — orchestrate/retrieve/analyze/verify/low_confidence/finalize + EvalLogger side-channel)
-- [x] Story 9  — Evaluation Logger (EvalLogger class + wired into every node)
-- [x] Story 10 — Streamlit UI (now wired to real `graph.workflow.run_query`, not the stub; 4 tabs all show real data; on-disk log reader in Evaluation Log tab)
-- [ ] Story 5  — MemoryAgent
-- [ ] Story 8  — Guardrails
-- [~] Story 11 — Unit Tests (29 helper tests done; `test_retriever.py` and `test_orchestrator.py` still pending)
-- [ ] Story 12 — Documentation
+- [x] Story 7  — LangGraph Workflow (orchestrate/retrieve/analyze/verify/low_confidence/finalize/memory — 7 nodes)
+- [x] Story 8  — Guardrails (corpus-agnostic: length, spam, injection, empty corpus; output disclaimer + sources footer)
+- [x] Story 9  — Evaluation Logger (`EvalLogger` class + `GUARDRAIL` stage for rejections, side-channel for every node)
+- [x] Story 10 — Streamlit UI (per-session UUID, file uploader for PDF/DOCX/TXT/MD, 4 tabs, confidence badge, reset button, 7-node spinner)
+- [~] Story 11 — Unit Tests (127 deterministic tests pass: 74 guardrails + 24 memory + 29 verifier helpers; `test_retriever.py` and `test_orchestrator.py` still pending)
+- [ ] Story 12 — Documentation (3 deliverables: `ARCHITECTURE.md`, `EVALUATION.md`, `UNIT_TESTS.md` — next up)
 
 ## Official Cognizant User Stories
 - [x] **US 1 — Complex Query Handling** — real RAG pipeline working end-to-end. Verified with a multi-doc query that retrieves 5 chunks from 2 sources, plans with 5 steps, synthesizes a 1549-char draft, and produces a final answer with a sources footer.
 - [x] **US 2 — Agent Planning & Orchestration** — every agent's action now leaves a structured JSON trail. Plan, decision_trace, retrieval, analysis, verification, final answer, and a SUMMARY entry all written to `logs/eval_<session_id>.json`.
 - [x] **US 3 — Grounded & Validated Responses** — real VerifierAgent (second Gemini call) replaces the stub verification. Returns structured `{confidence, grounded, flags}`. Conditional `low_confidence` edge adds a "Low confidence" disclaimer to the final answer when confidence < 0.6. Deterministic post-process forces confidence down 0.20 per LLM-detected flag.
 - [x] **US 4 — Explainability & Transparency** — all 4 Streamlit tabs (Answer / Agent Trace / Sources / Evaluation Log) wired to real `run_query()` output. Agent Trace tab shows plan + decision_trace + retrieved chunks + analyst draft + verification result with color-coded confidence badge. Evaluation Log tab reads the on-disk `logs/eval_<id>.json` file directly. Service-unavailable banner added for API errors.
-- [ ] US 5 — Governance & Guardrails
-- [ ] US 6 — Evaluation, Observability & Failure Detection (partially covered by US 4 RAG-Triad work)
+- [x] **US 5 — Governance & Guardrails** — `guardrails/checks.py` exposes corpus-agnostic `validate_input()` (length, special-char ratio, repetition, 19 prompt-injection patterns, empty-corpus block) and `apply_confidence_guardrail()` (low-confidence disclaimer + sources footer). Wired into `graph/workflow.py` — input check runs before the graph (skips the run, returns friendly rejection, writes `GUARDRAIL` log entry); output check runs inside `finalize_node` and wraps the answer. 74 unit tests cover positive cases, every rejection branch, threshold behaviour, deduplication, alphabetical sort, and precedence.
+- [ ] US 6 — Evaluation, Observability & Failure Detection (partially covered by US 4 RAG-Triad work + US 5 EvalLogger.GUARDRAIL stage; remaining gap: explicit "conflicting agent outputs" detection)
 
 ## Official Cognizant User Stories — Build Plan
 
@@ -139,7 +139,7 @@ print('flags:', r['verification_result']['flags'])
 ```
 
 ## Currently In Progress
-None — Official US 4 complete. Awaiting user pick for next US (recommended: **US 5 (Governance & Guardrails)** — only US with zero code, smallest scope at ~150 lines in `guardrails/checks.py`; then US 6 to do an explicit failure-mode sweep test).
+**Story 12 — Documentation.** Building the 3 explicit deliverables (`ARCHITECTURE.md`, `EVALUATION.md`, `UNIT_TESTS.md`) that the spec calls for. US 5 code is fully committed (commits `302b601`, `4921ad8`, `7f815eb`) and 127 tests pass; this docs cycle is the next deliverable. US 6 (final piece — "conflicting agent outputs" detection) is queued after docs.
 
 ## Completed so far
 - **Impl Story 0** — environment, `.env`, sample docs, `README.md`.
@@ -155,6 +155,10 @@ None — Official US 4 complete. Awaiting user pick for next US (recommended: **
 - **Official US 2** — Agent Planning & Orchestration (traceability portion): EvalLogger + wiring into every node of the workflow.
 - **Official US 3** — Grounded & Validated Responses: real Verifier + conditional low-confidence disclaimer + deterministic post-process.
 - **Official US 4** — Explainability & Transparency: all 4 UI tabs wired to real backend; Agent Trace shows plan + chunks + draft + verification + color-coded confidence badge; Evaluation Log reads on-disk JSON; Service-unavailable banner added; plus US 6 advancements (RAG-Triad verifier, 29 unit tests, refusal-detection flag, retriever pseudo-cosine fix).
+- **Official US 5** — Governance & Guardrails: `guardrails/checks.py` (`validate_input` + `apply_confidence_guardrail`), wired into `graph/workflow.py` (`run_query` skips the graph on guardrail rejection, `finalize_node` wraps the answer), `EvalLogger` gained the `GUARDRAIL` stage. 74 unit tests in `tests/test_guardrails.py`. Also delivered in the same cycle: Memory Agent (`agents/memory.py`), per-session ChromaDB collection, DOCX support, UI file uploader — broader "fully agentic" hardening pass.
+- **Impl Story 5** — MemoryAgent: `agents/memory.py` with `add()` / `get_context()` / `reset()` / `history` / `__len__`. `memory_node` wired into the LangGraph flow (finalize → memory → END). Orchestrator reads `memory.get_context()` into its planning prompt. 24 unit tests in `tests/test_memory.py`.
+- **Impl Story 8** — Guardrails: `guardrails/checks.py` corpus-agnostic. 19 prompt-injection patterns, special-char/repetition heuristics, length cap (5-2000), empty-corpus block. `apply_confidence_guardrail` prepends a `DISCLAIMER` when `confidence < 0.6` and always appends a sorted, deduped `**Sources:**` footer. 74 unit tests.
+- **Impl Story 10** — UI rewrite (per-session, file uploader): each browser session gets a UUID4 12-char session_id, its own ChromaDB collection at `chroma_db_sessions/session_<id>/`, and its own `MemoryAgent`. `st.file_uploader` accepts PDF/DOCX/TXT/MD; "Index uploaded files" button runs `safe_ingest_files()`; "Reset Session" button deletes the collection and regenerates the session_id. Sample queries in the UI changed to generic ("Summarize", "Compare") so they're corpus-agnostic.
 
 ## Completed Stories Summary
 ### Story 0 ✅
@@ -248,8 +252,26 @@ None — Official US 4 complete. Awaiting user pick for next US (recommended: **
     - `701d749` — `load_dotenv(override=True)` in all 7 modules (shell env was shadowing .env, causing wrong model to be used).
     - `06d3aa1` — Verifier: refusal pattern detection (initial fix for binary confidence, later superseded by RAG-Triad in `9398a6e`).
     - `9398a6e` — **RAG-Triad verifier**: 3-axis confidence (grounding / answer_quality / retrieval_confidence) + structured `claims[]` and `question_aspects[]` payload + 29 unit tests in new `tests/test_verifier_helpers.py`.
-  - **Cognizant spec satisfied**: 3 ACs all met. (1) Decision traces exposed via Agent Trace tab. (2) Retrieval results + validation outcomes logged in JSON and viewable in Evaluation Log tab. (3) Sources footer in final answer + Agent Trace tab shows the plan-chunks-draft-verification chain that produced the final answer.
+  - **Spec satisfied**: 3 ACs all met. (1) Decision traces exposed via Agent Trace tab. (2) Retrieval results + validation outcomes logged in JSON and viewable in Evaluation Log tab. (3) Sources footer in final answer + Agent Trace tab shows the plan-chunks-draft-verification chain that produced the final answer.
   - **Scope note**: the RAG-Triad refactor (`9398a6e`) is technically a US 6 (Eval/Observability) advancement wearing a US 4 label — it was driven by the user's complaint that confidence was binary, not by US 4's spec. The code is correct and useful, but the truthful framing is that US 4 was already met by `4c4199d` alone; the rest is a US 6 head-start.
+
+### Story 5 ✅ (MemoryAgent)
+- Completed: 2026-06-05
+- Notes: `agents/memory.py` — `MemoryAgent(session_id)` with `add()` / `get_context(last_n=3, max_answer_chars=400)` / `reset()` / `history` (read-only) / `__len__`. Pure-Python, no LLM, no persistence. Wired into `graph/workflow.py` as `memory_node` (finalize → memory → END). Orchestrator reads `memory.get_context()` into its planning prompt. `run_query(query, memory=mem)` accepts an optional instance. 24 unit tests in `tests/test_memory.py`.
+
+### Story 8 ✅ (Guardrails)
+- Completed: 2026-06-05
+- Notes: `guardrails/checks.py` exposes two public functions. `validate_input(query, corpus_size=0)` rejects empty/None, non-string, too-short (<5), too-long (>2000), special-char-heavy (>50%), repetition-heavy (>60%), prompt-injection patterns (19 regex), and queries against an empty corpus. `apply_confidence_guardrail(verification_result, answer, chunks, threshold=0.6)` prepends a `DISCLAIMER` when `confidence < threshold` and always appends a sorted, deduped `**Sources:**` footer. `DISCLAIMER` is a module constant. Corpus-agnostic — works for HR, legal, finance, IT, operations, or any enterprise document set. 74 unit tests in `tests/test_guardrails.py`.
+
+### Official US 5 ✅
+- Completed: 2026-06-05
+- Notes:
+  - **3-commit cycle** for this US (plus a "fully agentic" refactor piggy-backed on the same cycle):
+    - `302b601` — first cut: `guardrails/checks.py` with corpus-specific keyword list (HR/compliance/onboarding) + 17 injection patterns + `apply_confidence_guardrail` + UI rejection banner + `log_guardrail_rejection` in `EvalLogger` + 56 unit tests. `run_query` skips the graph on rejection. `finalize_node` delegates the disclaimer + footer to the new module.
+    - `4921ad8` — corpus-agnostic refactor: dropped the HR/compliance keyword list, added length cap (2000), special-char ratio, token-repetition ratio, empty-corpus block, 2 more injection patterns, regex bug fix. Also added the Memory Agent + 24 memory tests in this commit. Test count grew from 56 to 98.
+    - `7f815eb` — per-session hardening: UUID4 session_id, per-session ChromaDB collection, per-session `MemoryAgent`, file uploader (PDF/DOCX/TXT/MD), `safe_ingest_files` + `delete_collection` in `vector_store/ingest.py`, sample queries in the UI changed to generic. Sample docs deleted. Test count grew to 127.
+  - **Spec satisfied**: 3 ACs all met. (1) Input validation: `validate_input()` covers empty/short/long, prompt-injection, spam/repetition, non-string, empty corpus. (2) Hallucination controls + confidence thresholds: 0.6 threshold in `finalize_node` via `apply_confidence_guardrail`; `low_confidence` node sets `needs_disclaimer=True`. (3) Source attribution + disclaimers: every final answer has a `**Sources:**` footer citing the unique source files; low-confidence answers are visibly flagged with a `DISCLAIMER` block.
+  - **Scope note**: the broader "fully agentic" refactor (`4921ad8` + `7f815eb`) added Memory Agent + per-session + file uploader + DOCX support. These are US 2 (Memory Agent), US 4 (Streamlit UI), and a spec-driven "make the system work with arbitrary user-uploaded corpora" hardening — not strictly US 5. The truthful framing: **US 5 was met by `302b601` alone; the rest of the cycle is a broader hardening pass that delivered US 2 (Memory), made the UI truly user-driven, and made the guardrails corpus-agnostic.**
 
 ## Blockers
 - ~~BLOCKER 2026-06-03: No `GEMINI_API_KEY` is configured.~~ RESOLVED 2026-06-04: user provided key `AQ.Ab8RN6JWz...` and stored it in `.env` (gitignored). Confirmed working via a real ingestion run.
@@ -292,6 +314,15 @@ None — Official US 4 complete. Awaiting user pick for next US (recommended: **
 - DEVIATION US 4: `load_dotenv(override=True)` is now called in all 7 modules (`retriever.py`, `analyst.py`, `verifier.py`, `orchestrator.py`, `workflow.py`, `logger.py`, `ui/app.py`). Reason: the user's shell has `GEMINI_MODEL=gemini-flash-latest` and other Gemini vars set globally, which was silently shadowing the `.env` file (which uses `gemini-3.1-flash-lite`). Without `override=True`, the wrong model was being used, hitting the 20 RPD free-tier quota.
 - DEVIATION US 4: the Agent Trace tab in the UI now shows **3 colored badges** (Grounding / Answer Quality / Retrieval Confidence) plus per-claim support tags in an expandable Claims section and per-aspect status in a Question aspects section. None of this is in agents.md US 4's spec — it comes from the RAG-Triad refactor. Useful for US 6 (Eval/Observability) and US 4 "I want to evaluate agentic decision-making" goal, but a strict reading of the spec didn't ask for it.
 - DEVIATION US 4: a refusal-detection pattern (9 system-message prefix strings) was added to the verifier in `06d3aa1` to catch cases where the LLM returns a generic "I cannot answer" response. This was later replaced/superseded by the structured `NO_ANSWER_FROM_CORPUS` flag in the RAG-Triad refactor (`9398a6e`). The 9-prefix set is still in `agents/verifier.py` as `SYSTEM_PREFIXES` and is used to detect refusal-style answers in the supporting math (claims with "absence_supported" support).
+- DEVIATION US 5: the first cut of `guardrails/checks.py` (`302b601`) had a corpus-specific keyword list that rejected queries with no HR/compliance/onboarding tokens. Removed in `4921ad8` because the system is now corpus-agnostic — the user uploads arbitrary enterprise documents. Replaced with corpus-agnostic checks: length cap (5-2000), special-char ratio (<50%), token-repetition ratio (<60%), empty-corpus block. The 19 prompt-injection patterns stayed.
+- DEVIATION US 5: regex bug in the first cut — the pattern `(?:?!assistant)` was invalid (negative lookahead with no positive branch). Replaced with `act as (?:a|an)` to match "act as a chef" / "act as an admin" without false positives on every occurrence of "assistant". Caught by the test suite on the first run.
+- DEVIATION US 5: the bypass/override injection patterns are now flexible: `bypass (?:[^.\n]{0,30})?safety` matches "bypass safety filters", "bypass the safety guardrails", etc. with an optional 30-char buffer between the trigger word and the target noun.
+- DEVIATION US 5: the EvalLogger no longer writes a SUMMARY entry on guardrail-rejected queries. Reason: there was no real run, so there is nothing to summarize. The FINAL entry (with the rejection message and 0ms elapsed) is the last entry. The audit trail still shows QUERY_START + GUARDRAIL + FINAL, which is enough to see what happened.
+- DEVIATION US 5: `apply_confidence_guardrail` is now called inside `finalize_node` rather than as a conditional edge. Reason: it needs to operate on the actual `verification_result` from state, not on a routing decision, and the inline conditional edge was getting tangled with the existing `low_confidence → finalize` path.
+- DEVIATION US 5: the "broader hardening" commits (`4921ad8` + `7f815eb`) added the Memory Agent, per-session ChromaDB collection, file uploader, and DOCX support. These are US 2 (Memory) and US 4 (UI) deliverables, not strictly US 5. They were lumped into the US 5 cycle because the user asked for a single "fully agentic" pass that touched the same files. The truthful framing: US 5 was met by `302b601`; the rest is broader hardening.
+- DEVIATION US 5: the legacy sample docs (`docs/policy_hr.txt`, `docs/sop_onboarding.txt`, `docs/compliance_manual.txt`) and the `docs/` directory were deleted as part of the same cycle. Reason: the new per-session upload model means the user provides their own corpora, and the hardcoded HR-specific files would be misleading sample data for the "fully agentic" framing. The CLI `vector_store/ingest.py` still works with a directory passed via `--docs-dir`, so anyone who needs to bulk-ingest a corpus can still do so — they just need to create the directory themselves.
+- DEVIATION Story 5: `MemoryAgent` is a pure-Python class, NOT a LangGraph node with its own LLM. The agents.md Story 5 spec says "Implement a simple in-memory store: `session_history: List[dict]`". The implementation matches the spec — no LLM call, no summarization, no persistence. The "agent" name is consistent with the project's 5-agent architecture, but it's really a session-scoped data structure, not a reasoning agent.
+- DEVIATION Story 5: `MemoryAgent.get_context()` truncates answers at `max_answer_chars=400` by default. Reason: prompt-injection safety — a long prior answer could itself become an injection vector if injected verbatim into the next orchestrator prompt. 400 chars is enough to capture the semantic gist of a prior answer without re-prompting the LLM with thousands of tokens of user content.
 
 ## Environment State
 - OS: macOS (darwin)
@@ -300,12 +331,12 @@ None — Official US 4 complete. Awaiting user pick for next US (recommended: **
 - Gemini model: `gemini-3.1-flash-lite` (user-specified; no immediate rate-limit hit, unlike `gemini-flash-latest` which is 20 RPD)
 - Gemini embedding model: `models/gemini-embedding-001` (only stable embed model exposed by this key)
 - Embedding backend: Ollama (`nomic-embed-text`, model id `0a109f422b47`) — default, no rate limit
-- ChromaDB populated: YES (44 chunks across 3 docs, persisted to `./chroma_db/`, gitignored)
+- ChromaDB populated: NO (no global `chroma_db/`) — per-session corpora live at `chroma_db_sessions/session_<id>/`, gitignored
 - Verified imports: `langchain`, `chromadb`, `langgraph`, `langchain_google_genai` all import successfully
 - Test framework: `pytest` + `pytest-mock` (declared in `pyproject.toml` under `[dependency-groups].dev`)
-- Test status: 29 tests pass in `tests/test_verifier_helpers.py` (<1s, no LLM calls)
-- Verified end-to-end: `python vector_store/ingest.py` runs cleanly, reports per-doc chunk counts, persists to disk.
-- Live Streamlit instance: pid 82824 (after killing stale ones 77820, 81879); reachable at http://localhost:8765
+- Test status: 127 tests pass (74 guardrails + 24 memory + 29 verifier helpers) in <1s with no LLM calls
+- Verified end-to-end: empty corpus → guardrail blocks; ingest 1 file → 12 chunks indexed; query → 1.00 confidence, 1 memory turn; reset session → collection deleted, corpus_size=0; query after reset → blocked again. All in a single per-session E2E test on 2026-06-05.
+- Live Streamlit instance: pid 14335; reachable at http://localhost:8765
 
 ## File Change Log
 - 2026-06-03 CREATED `.env.example` — template for `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_EMBEDDING_MODEL`
@@ -371,6 +402,18 @@ None — Official US 4 complete. Awaiting user pick for next US (recommended: **
   - "When do I need to give notice to take bereavement leave?" → 0.85 (HIGH) — was 0.10 with the old binary scoring
   4 of 5 land in the 0.5–0.95 confidence range; success criterion (≥3) met.
 - 2026-06-04 MODIFIED `progress.md` — per rule #0a, this update happens AFTER the user acknowledged US 4 completion. Marked Official US 4 complete; updated Last Updated, Currently In Progress, Completed so far, Completed Stories Summary. Added 8 new DEVIATION entries (scope creep note, `_api_errors.py`, public scoring helpers, `test_verifier_helpers.py`, retriever pseudo-cosine, `load_dotenv(override)`, Agent Trace 3 badges, refusal detection history). Marked Story 11 as in-progress. Added 10 new File Change Log entries for the 6-commit US 4 cycle.
+- 2026-06-05 CREATED `guardrails/checks.py` (commit `302b601`) — `validate_input()` and `apply_confidence_guardrail()`. First cut had a corpus-specific keyword list (HR/compliance/onboarding) and 17 injection patterns; corpus-agnostic refactor in `4921ad8` removed the keyword list, added length cap (5-2000), special-char ratio (<50%), token-repetition ratio (<60%), empty-corpus block, 2 more injection patterns, and a regex bug fix (`(?:?!assistant)` → `act as (?:a|an)`). `DISCLAIMER` constant and the sources footer logic now live here instead of in `workflow.py`.
+- 2026-06-05 MODIFIED `graph/workflow.py` (commit `302b601`) — `run_query` now calls `validate_input(query, corpus_size)` before invoking the graph. On rejection: writes a `GUARDRAIL` log entry, returns a friendly rejection in `final_answer`, populates `error="guardrail_rejected: ..."` and `decision_trace=["GUARDRAIL: query rejected — ..."]`, skips the graph, logs `FINAL` (not `SUMMARY`) so the audit trail clearly shows no real run happened. `finalize_node` now calls `apply_confidence_guardrail()` instead of doing inline disclaimer+footer logic.
+- 2026-06-05 MODIFIED `evaluation/logger.py` (commit `302b601`) — added `log_guardrail_rejection(query, reason)` for the `GUARDRAIL` stage. EvalLogger stages are now: `QUERY_START | ORCHESTRATION | RETRIEVAL | ANALYSIS | VERIFICATION | FINAL | FAILURE | GUARDRAIL | SUMMARY`.
+- 2026-06-05 CREATED `tests/test_guardrails.py` (commit `302b601`, expanded in `4921ad8`) — 74 deterministic tests. Covers `validate_input`: 20 positive corpus-agnostic queries, 17 prompt-injection patterns (case-insensitive), 7 spam/repetition cases, length boundaries (min/max), `None`/non-string types, empty-corpus precedence, injection-before-corpus precedence. Covers `apply_confidence_guardrail`: high-confidence (footer only, no disclaimer), low-confidence (disclaimer prepended), threshold default 0.6, custom threshold, no-chunks fallback, empty/None answer, missing/None verification (default to high confidence), source dedupe, alphabetical sort. All tests run in <1s with no LLM calls.
+- 2026-06-05 CREATED `agents/memory.py` (commit `4921ad8`) — `MemoryAgent` class. `add(query, answer, sources, timestamp=None)` appends a `{query, answer, sources, timestamp}` entry. `get_context(last_n=3, max_answer_chars=400)` formats the last N turns as `Q{n}: ... / A{n}: ... / S{n}: ...` blocks for Orchestrator prompt injection. `reset()` clears history. `history` is a read-only property that returns a copy. Per-session, in-memory (NOT persisted). 24 unit tests in `tests/test_memory.py`.
+- 2026-06-05 MODIFIED `graph/workflow.py` (commit `4921ad8`) — `AgentState` gains `memory: MemoryAgent` field. `orchestrate_node` reads `memory.get_context()` and passes it as `session_context` to `plan()`. New `memory_node` appended at the end of the graph: `finalize → memory → END`. `memory_node` reads `final_answer`, `retrieved_chunks`, and `query` from state, calls `memory.add(...)`, returns updated `session_history`. `run_query(query, memory=None)` now accepts an optional `MemoryAgent` instance.
+- 2026-06-05 CREATED `tests/test_memory.py` (commit `4921ad8`) — 24 deterministic tests. Covers: empty memory, append, length increment, stripping whitespace, sources normalization (tuple→list), None sources, empty/None query/answer, provided/auto timestamp, `get_context` empty/single/multi-turn, truncation at `max_answer_chars`, `last_n` truncation, `last_n=1`, correct turn numbering when truncated, `reset()` clears, `reset()` + `add` starts fresh, `history` returns a copy (mutation safety), session_id recording, separate instances have separate history, 50-turn long history, no-sources fallback. Runs in <1s.
+- 2026-06-05 MODIFIED `agents/retriever.py` (commit `7f815eb`) — replaced hardcoded `COLLECTION_NAME`/`PERSIST_DIR` constants with module-level mutable state `_active_collection_name` / `_active_persist_dir`. New `set_active_collection(name, persist_dir)` switches the retriever to a different Chroma collection (called by the UI per session). New `get_active_collection_name()` / `get_active_persist_dir()`. New `get_corpus_size()` for the input guardrail's empty-corpus check. Vectorstore singleton is invalidated on switch.
+- 2026-06-05 MODIFIED `vector_store/ingest.py` (commit `7f815eb`) — added `safe_ingest_files(file_paths, ...)` for programmatic UI ingestion (vs. existing `safe_ingest_dir` for CLI). Added `delete_collection(persist_dir, collection_name)` for the Reset button. `SUPPORTED_SUFFIXES = {.pdf, .txt, .md, .docx}` (new: `.docx` via `Docx2txtLoader`). `CHUNK_SIZE=500`, `CHUNK_OVERLAP=50` exported as module constants.
+- 2026-06-05 MODIFIED `ui/app.py` (commit `7f815eb`) — full rewrite. Per-session: `st.session_state.session_id` is a UUID4 12-char string; per-session `MemoryAgent` and per-session `chroma_db_sessions/session_<id>/` directory. Sidebar shows: session_id, memory turn count, corpus size, embedding backend info, `st.file_uploader` for PDF/DOCX/TXT/MD, "Index uploaded files" button (runs `safe_ingest_files`), indexed-files list, "Reset Session" button (calls `delete_collection` and regenerates session_id). Sample queries changed from HR-specific to generic ("Summarize the main points", "Compare the policies"). `load_dotenv(override=True)` confirmed. Streamlit on port 8765, pid 14335.
+- 2026-06-05 DELETED `docs/policy_hr.txt`, `docs/sop_onboarding.txt`, `docs/compliance_manual.txt` (and the `docs/` directory). These were the legacy hardcoded sample docs from US 1; the new per-session upload model means the user provides their own.
+- 2026-06-05 MODIFIED `.gitignore` — added `chroma_db_sessions/` (per-session corpora) alongside the existing `chroma_db/`.
 
 ---
 
