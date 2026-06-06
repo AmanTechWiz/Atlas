@@ -4,7 +4,7 @@ These tests do NOT call any LLM. They exercise the pure-Python scoring
 math (grounding / answer quality / retrieval) and the post-processing
 cap logic by mocking the LLM call.
 
-Acceptance criteria (agents.md Story 11):
+Acceptance criteria:
 - Tests are independent (no shared state)
 - All tests pass with `pytest tests/`
 """

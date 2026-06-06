@@ -1,7 +1,5 @@
 """Input validation and output guardrails for the knowledge-ops pipeline.
 
-Satisfies Official US 5 (Governance & Guardrails) and Story 8 of agents.md.
-
 The guardrails are CORPUS-AGNOSTIC — they do not assume the user has
 uploaded HR/compliance/onboarding documents. They run basic safety
 checks (length, injection detection, empty corpus) that apply to any
@@ -138,7 +136,7 @@ def apply_confidence_guardrail(
     """Wrap the answer with a low-confidence disclaimer and a sources footer.
 
     - Prepends `DISCLAIMER` to the answer when `verification_result.confidence
-      < confidence_threshold` (default 0.6 per Story 4 of agents.md).
+      < confidence_threshold` (default 0.6, see EVALUATION.md).
     - Appends a `**Sources:**` footer listing the unique source files used
       (or "(none — no relevant chunks were retrieved)" when chunks is empty).
 

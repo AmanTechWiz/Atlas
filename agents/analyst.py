@@ -1,6 +1,6 @@
 """AnalystAgent — reasons across retrieved chunks to form a grounded answer.
 
-Acceptance criteria (agents.md Story 3):
+Acceptance criteria:
 - Answer references multiple chunks when available
 - Output format includes Reasoning, Answer, Sources Used sections
 - Model does not hallucinate beyond provided context (enforced by prompt)

@@ -1,8 +1,5 @@
 """MemoryAgent — conversation context for multi-turn Q&A.
 
-Satisfies Official US 2 (Distinct agents for retrieval, reasoning,
-validation, AND memory) and Story 5 of agents.md.
-
 Stores a history of queries, answers, and the sources cited in each
 turn. `get_context()` formats the most recent N turns as a
 human-readable block that the OrchestratorAgent injects into its
@@ -11,8 +8,8 @@ context ("how does that compare to the policy you mentioned
 earlier?").
 
 The agent is a single in-process instance; on a fresh start call
-`reset()`. The class deliberately does NOT persist to disk — it
-is conversation-scoped, not document-scoped.
+`reset()`. The class deliberately does NOT persist to disk —
+it is conversation-scoped, not document-scoped.
 
 Public API:
     MemoryAgent(session_id="default")
