@@ -67,12 +67,6 @@ else:
 
 UPLOAD_TYPES = ["pdf", "docx", "txt", "md"]
 
-SAMPLE_QUERIES = [
-    "Summarize the key points across the uploaded documents.",
-    "What is the most important policy or procedure described here?",
-    "Compare and contrast the requirements described in the documents.",
-]
-
 
 # --------------------------------------------------------------------------- #
 # Dark theme CSS
@@ -245,6 +239,15 @@ def _inject_css() -> None:
             border-color: var(--danger) !important;
         }
 
+        .side-info { display: flex; flex-direction: column; gap: 8px; }
+        .side-info-row {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 6px 10px; background: var(--bg-2);
+            border: 1px solid var(--line); border-radius: 8px;
+        }
+        .side-info-lbl { color: var(--text-1); font-size: 12px; }
+        .side-info-val { color: var(--text-0); font-size: 13px; font-weight: 600; }
+
         [data-testid="stFileUploaderDropzone"] {
             background: var(--bg-2) !important; border: 1.5px dashed var(--line) !important; border-radius: 10px !important;
         }
@@ -289,6 +292,8 @@ def _ensure_session_state() -> None:
         st.session_state.uploader_key = 0
     if "confirming_reset" not in st.session_state:
         st.session_state.confirming_reset = False
+    if "_bootstrapped" not in st.session_state:
+        st.session_state._bootstrapped = False
 
 
 def _corpus_size() -> int:
@@ -332,6 +337,33 @@ def reset_knowledge_base() -> None:
     st.session_state.uploaded_filenames = []
     st.session_state.uploader_key += 1
     st.session_state.confirming_reset = False
+
+
+def _auto_reset_on_startup() -> None:
+    """Wipe the knowledge base on every fresh Streamlit session.
+
+    Streamlit's session state is reset on every browser refresh /
+    server restart, but the underlying ChromaDB collection persists
+    on disk. The user wants a clean slate on every session start, so
+    we call `reset_collection` here exactly once per Streamlit
+    session. Re-uploads are required after the wipe.
+    """
+    if reset_collection is not None:
+        try:
+            reset_collection(PERSIST_DIR, COLLECTION_NAME)
+        except Exception:
+            pass
+    from agents.retriever import invalidate_cache
+    try:
+        invalidate_cache()
+    except Exception:
+        pass
+    memory = st.session_state.get("memory")
+    if memory is not None:
+        memory.reset()
+    st.session_state.messages = []
+    st.session_state.uploaded_filenames = []
+    st.session_state.uploader_key += 1
 
 
 def _ingest_files(uploaded_files) -> tuple[bool, str]:
@@ -481,6 +513,10 @@ def main() -> None:
     _inject_css()
     _ensure_session_state()
 
+    if not st.session_state._bootstrapped:
+        _auto_reset_on_startup()
+        st.session_state._bootstrapped = True
+
     backend = os.getenv("EMBEDDING_BACKEND", "ollama")
     model = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
     corpus = _corpus_size()
@@ -508,44 +544,6 @@ def main() -> None:
     )
 
     with st.sidebar:
-        st.markdown("### Knowledge base")
-
-        with st.expander("Upload documents", expanded=True):
-            uploaded = st.file_uploader(
-                "Drop PDFs / DOCX / TXT / MD",
-                type=UPLOAD_TYPES,
-                accept_multiple_files=True,
-                key=f"uploader_{st.session_state.uploader_key}",
-                label_visibility="collapsed",
-            )
-            if uploaded and st.button("Index uploaded files", type="primary", use_container_width=True):
-                with st.spinner("Embedding and indexing..."):
-                    ok, msg = _ingest_files(uploaded)
-                if ok:
-                    st.success(msg)
-                else:
-                    st.error(msg)
-                st.rerun()
-
-        if st.session_state.uploaded_filenames:
-            st.markdown("**Indexed files**")
-            for name in st.session_state.uploaded_filenames:
-                st.markdown(f"- `{name}`")
-        else:
-            st.caption("No files indexed yet.")
-
-        if doc_types:
-            st.caption(f"Detected document types: {', '.join(doc_types)}")
-
-        st.markdown("---")
-
-        if _IMPORT_ERROR:
-            st.error(f"Import error: {_IMPORT_ERROR}")
-        else:
-            st.success("Backend online", icon="🟢")
-
-        st.markdown("---")
-        st.markdown("### Danger zone")
         if not st.session_state.confirming_reset:
             st.button(
                 "Reset Knowledge Base",
@@ -568,6 +566,61 @@ def main() -> None:
                 st.session_state.confirming_reset = False
                 st.rerun()
 
+        st.markdown("---")
+
+        st.markdown(
+            f"""
+            <div class="side-info">
+                <div class="side-info-row">
+                    <span class="side-info-lbl">Chunks embedded</span>
+                    <span class="side-info-val">{corpus}</span>
+                </div>
+                <div class="side-info-row">
+                    <span class="side-info-lbl">Embedding model</span>
+                    <span class="side-info-val">{_escape(os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text"))}</span>
+                </div>
+                <div class="side-info-row">
+                    <span class="side-info-lbl">LLM</span>
+                    <span class="side-info-val">{_escape(model)}</span>
+                </div>
+                <div class="side-info-row">
+                    <span class="side-info-lbl">Backend</span>
+                    <span class="side-info-val">{_escape(backend)}</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if _IMPORT_ERROR:
+            st.error(f"Import error: {_IMPORT_ERROR}")
+
+        st.markdown("---")
+
+        with st.expander("Upload documents", expanded=False):
+            uploaded = st.file_uploader(
+                "Drop PDFs / DOCX / TXT / MD",
+                type=UPLOAD_TYPES,
+                accept_multiple_files=True,
+                key=f"uploader_{st.session_state.uploader_key}",
+                label_visibility="collapsed",
+            )
+            if uploaded and st.button("Index uploaded files", type="primary", use_container_width=True):
+                with st.spinner("Embedding and indexing..."):
+                    ok, msg = _ingest_files(uploaded)
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+                st.rerun()
+
+        if st.session_state.uploaded_filenames:
+            st.markdown("**Indexed files**")
+            for name in st.session_state.uploaded_filenames:
+                st.markdown(f"`{name}`")
+        else:
+            st.caption("No files indexed yet.")
+
     if not st.session_state.messages:
         _render_welcome(corpus, uploaded_filenames=st.session_state.uploaded_filenames)
     else:
@@ -585,9 +638,9 @@ def main() -> None:
 
 
 def _render_welcome(corpus: int, uploaded_filenames: List[str]) -> None:
-    """Show centered hero with upload CTA + sample prompts when chat is empty."""
+    """Show centered hero when chat is empty."""
     if corpus == 0 and not uploaded_filenames:
-        sub = "Upload a PDF, DOCX, or TXT to get started."
+        sub = "Upload a PDF, DOCX, or TXT in the sidebar to get started."
     elif corpus == 0:
         sub = "Files uploaded but not yet indexed — click 'Index uploaded files' in the sidebar."
     else:
@@ -598,21 +651,10 @@ def _render_welcome(corpus: int, uploaded_filenames: List[str]) -> None:
         <div class="hero">
             <div class="big">How can I help you today?</div>
             <div class="sub">{_escape(sub)}</div>
-            <div class="grid">
-                <div class="chip">📄 Summarize a document<div class="lbl">Get the key points fast</div></div>
-                <div class="chip">🔍 Find a specific clause<div class="lbl">Search contracts, policies, SOPs</div></div>
-                <div class="chip">⚖️ Compare requirements<div class="lbl">Side-by-side reasoning across docs</div></div>
-                <div class="chip">🧠 Multi-turn follow-ups<div class="lbl">Remembers the last 3 turns</div></div>
-            </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-
-    cols = st.columns(len(SAMPLE_QUERIES))
-    for col, sample in zip(cols, SAMPLE_QUERIES):
-        if col.button(sample, key=f"sample_{sample[:24]}"):
-            _run_turn(sample)
 
 
 def _render_message(msg: Dict[str, Any]) -> None:
