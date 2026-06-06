@@ -73,9 +73,77 @@ The full state machine runs through LangGraph. Every node writes to a shared sta
 | UI | Streamlit, dark theme | Fast to iterate, no JS build step |
 | Package manager | `uv` | Lockfile committed, fast installs, no `requirements.txt` drift |
 
+## Prerequisites — running in the background
+
+The app's hot path needs three things running on your machine: **Python 3.11+**, **Ollama** (for local embeddings), and your **Gemini API key** (for the LLM). ChromaDB is embedded in the app — no separate server to start. This section shows you how to run the prerequisites as background services so the app never errors out on a missing dependency.
+
+### Ollama (embeddings)
+
+Ollama serves the embedding model over `http://localhost:11434`. The app calls it on every `Index` click and every query (for the query embedding). It must be running before you start the app.
+
+**macOS — install once and run as a background service:**
+
+```bash
+brew install ollama
+brew services start ollama            # auto-starts on login, auto-restarts on crash
+ollama pull nomic-embed-text          # one-time, ~274 MB
+```
+
+**Linux — install once and run as a background service:**
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull nomic-embed-text
+# systemd starts ollama automatically on install
+```
+
+**Verify it's running:**
+
+```bash
+ollama list                # should show nomic-embed-text
+curl http://localhost:11434   # should return "Ollama is running"
+```
+
+If you do not want to run Ollama locally, you can fall back to Gemini embeddings by setting `EMBEDDING_BACKEND=gemini` in your `.env`. This adds embedding calls to your Gemini quota (5 RPM / 20 RPD on the free tier).
+
+### ChromaDB (vector store)
+
+There is no separate ChromaDB server. ChromaDB 1.5 is embedded — it writes to a local `chroma_db/` directory at the project root. The first time you click **Index** in the sidebar, the app creates `chroma_db/eko_corpus/` automatically.
+
+What you need:
+
+- The `chroma_db/` directory must be writable. It is already in `.gitignore`, so it will not be committed.
+- No port, no API key, no separate process to babysit.
+- A fresh `chroma_db/` is created on every streamlit restart (the app auto-resets the knowledge base on startup).
+
+### Gemini API key (LLM)
+
+Get a free key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey). Paste it into your `.env`:
+
+```bash
+GEMINI_API_KEY=your_real_key_here
+GEMINI_MODEL=gemini-3.1-flash-lite
+```
+
+Free tier limits: 5 RPM (requests per minute), 20 RPD (requests per day). A typical query uses 2–3 requests (orchestrator + analyst + verifier), so the daily limit is roughly 6–8 queries per day on the free tier. If you hit the limit, the UI shows a yellow "Service unavailable" banner and writes a `FAILURE` log entry — your data is never lost.
+
+### Preflight checklist
+
+Before starting the app, confirm:
+
+```bash
+ollama list                          # Ollama is running and the model is pulled
+curl -s http://localhost:11434       # returns "Ollama is running"
+python3 --version                    # 3.11 or newer
+which uv                             # uv is installed
+grep GEMINI_API_KEY .env             # key is set (not the placeholder)
+```
+
+If all five pass, the app will not error on startup. The first **Index** click is what actually instantiates the ChromaDB client and the embedder; if Ollama is down at that moment, the UI shows a clear connection error in the upload panel — start Ollama and re-index.
+
 ## Quick start
 
-You need Python 3.11 or newer, the `uv` package manager, and a Google Gemini API key from [aistudio.google.com](https://aistudio.google.com/apikey). For local embeddings you also need [Ollama](https://ollama.com/) and the `nomic-embed-text` model pulled.
+You need Python 3.11 or newer, the `uv` package manager, a Google Gemini API key, and (for local embeddings) Ollama running in the background. See the **Prerequisites** section above for the install steps.
 
 Clone the repo and install dependencies. The lockfile is committed, so you get the exact tested versions.
 
