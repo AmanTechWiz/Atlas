@@ -67,6 +67,8 @@ SYSTEM_PREFIXES = (
     "UNSUPPORTED_CLAIM",
     "CONTRADICTED_CLAIM",
     "PARTIAL_ANSWER",
+    "CONFLICTING_SOURCES",
+    "SINGLE_SOURCE_RETRIEVAL",
 )
 
 SUPPORT_WEIGHTS: Dict[str, float] = {
@@ -110,7 +112,8 @@ You will receive:
 
 Your job: decompose the draft answer into individual factual *claims* and
 classify each one by how well it is supported by the chunks. Then identify
-which *aspects* of the user's question were actually answered.
+which *aspects* of the user's question were actually answered. Finally,
+detect any *conflicts* between the retrieved sources themselves.
 
 Return ONLY a JSON object in this exact format (no other text, no markdown fences):
 
@@ -130,6 +133,15 @@ Return ONLY a JSON object in this exact format (no other text, no markdown fence
       "reason": "<short explanation>"
     }
   ],
+  "conflicts": [
+    {
+      "topic": "<the factual topic both chunks address>",
+      "source_a": "<filename>",
+      "claim_a": "<what source A says about the topic>",
+      "source_b": "<filename>",
+      "claim_b": "<what source B says about the topic>"
+    }
+  ],
   "flags": ["<list of short issue strings>"]
 }
 
@@ -145,11 +157,21 @@ ASPECT STATUS TAGS (use exactly one per aspect):
 - partially_answered: some relevant info is provided but a key part is missing
 - not_answered:       no useful information was provided for this aspect
 
+CONFLICTS (cross-source disagreement):
+- A conflict exists when two or more retrieved chunks from DIFFERENT sources
+  make factually opposite or materially different claims about the SAME topic
+  (e.g. policy A says parental leave is 12 weeks, policy B says 8 weeks).
+- Do NOT flag stylistic differences, paraphrases of the same fact, or
+  chunks that discuss different sub-topics. Only flag genuine factual
+  disagreement on a single topic across distinct sources.
+- If no conflicts are present, return an empty list.
+
 RULES:
 - Break the answer into 2-8 specific factual claims. Each distinct claim should be its own entry.
 - Identify 1-3 question_aspects based on what the user is actually asking.
 - Use "absence_supported" only when the chunks genuinely don't cover the topic. Do NOT default to it.
 - If the answer says "I cannot answer" or "the documents do not contain X", add a question_aspect with status "not_answered" and reason explaining what was missing.
+- `conflicts`: list every genuine cross-source disagreement you find across the retrieved chunks. Empty list if there are none.
 - `flags`: list specific issues that don't fit in claims (e.g., "answer too long", "uses external knowledge", "missing source citations", "answer contradicts itself").
 - Do NOT include explanations or markdown fences. Return ONLY the JSON object.
 """
@@ -214,6 +236,34 @@ def _normalize_aspect(a: Any) -> Dict[str, Any]:
     }
 
 
+def _normalize_conflict(c: Any) -> Optional[Dict[str, str]]:
+    """Normalize a verifier-emitted conflict record. Returns None when the
+    record is malformed or has no real content (so the caller can drop it).
+
+    A conflict must have a topic and two distinct sources making distinct
+    claims. Self-conflicts (same source on both sides) and empty fields
+    are dropped.
+    """
+    if not isinstance(c, dict):
+        return None
+    topic = str(c.get("topic", "")).strip()
+    src_a = str(c.get("source_a", "")).strip()
+    src_b = str(c.get("source_b", "")).strip()
+    claim_a = str(c.get("claim_a", "")).strip()
+    claim_b = str(c.get("claim_b", "")).strip()
+    if not topic or not src_a or not src_b or not claim_a or not claim_b:
+        return None
+    if src_a == src_b and claim_a == claim_b:
+        return None
+    return {
+        "topic": topic,
+        "source_a": src_a,
+        "claim_a": claim_a,
+        "source_b": src_b,
+        "claim_b": claim_b,
+    }
+
+
 def _is_useful_claim(claim: Dict[str, Any]) -> bool:
     return claim.get("support") in _USEFUL_SUPPORT
 
@@ -275,6 +325,7 @@ def verify(draft_answer: str, chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
           "retrieval_confidence": float in [0.0, 1.0],
           "claims": list[dict],
           "question_aspects": list[dict],
+          "conflicts": list[dict],   # cross-source disagreements (US 6)
         }
 
     On any internal failure (no chunks, empty draft, LLM error, JSON parse
@@ -294,6 +345,7 @@ def verify(draft_answer: str, chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
             "retrieval_confidence": 0.0,
             "claims": [],
             "question_aspects": [],
+            "conflicts": [],
         }
 
     if not draft_answer or not draft_answer.strip():
@@ -309,6 +361,7 @@ def verify(draft_answer: str, chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
             "retrieval_confidence": retrieval_confidence_from_chunks(chunks),
             "claims": [],
             "question_aspects": [],
+            "conflicts": [],
         }
 
     context = _format_chunks(chunks)
@@ -336,6 +389,7 @@ def verify(draft_answer: str, chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
             "retrieval_confidence": retrieval_confidence_from_chunks(chunks),
             "claims": [],
             "question_aspects": [],
+            "conflicts": [],
         }
 
     parsed = _parse_json_response(raw)
@@ -352,10 +406,16 @@ def verify(draft_answer: str, chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
             "retrieval_confidence": retrieval_confidence_from_chunks(chunks),
             "claims": [],
             "question_aspects": [],
+            "conflicts": [],
         }
 
     claims: List[Dict[str, Any]] = [_normalize_claim(c) for c in (parsed.get("claims") or [])]
     aspects: List[Dict[str, Any]] = [_normalize_aspect(a) for a in (parsed.get("question_aspects") or [])]
+    conflicts: List[Dict[str, str]] = []
+    for c in (parsed.get("conflicts") or []):
+        normalized = _normalize_conflict(c)
+        if normalized is not None:
+            conflicts.append(normalized)
     flags: List[str] = []
     for f in (parsed.get("flags") or []):
         if isinstance(f, str) and f.strip():
@@ -383,6 +443,25 @@ def verify(draft_answer: str, chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
         _add_flag(flags, "LOW_CONFIDENCE — answer may not be fully supported by documents")
     if len(chunks) < 2:
         _add_flag(flags, f"INSUFFICIENT_RETRIEVAL — only {len(chunks)} chunk(s) retrieved (< 2)")
+
+    # Source-diversity failure: when the corpus has 2+ sources but the
+    # retriever only returned chunks from one of them, the answer is built
+    # on a single document even though the user uploaded more. The retriever
+    # marks these chunks with `_diversity_flag="SINGLE_SOURCE_RETRIEVAL"`.
+    unique_sources_in_result = {c.get("source") for c in chunks if c.get("source")}
+    has_diversity_flag = any(c.get("_diversity_flag") == "SINGLE_SOURCE_RETRIEVAL" for c in chunks)
+    if has_diversity_flag:
+        only_src = next(iter(unique_sources_in_result), "unknown")
+        _add_flag(
+            flags,
+            f"SINGLE_SOURCE_RETRIEVAL — all {len(chunks)} chunk(s) came from "
+            f"'{only_src}'; corpus has multiple sources that were not consulted",
+        )
+        # Cap confidence: even if the answer reads well, the retrieval
+        # missed the other documents the user uploaded.
+        confidence = min(confidence, 0.5)
+        grounded = False
+
     if has_unsupported:
         n_unsup = sum(1 for c in claims if c.get("support") == "unsupported")
         _add_flag(flags, f"UNSUPPORTED_CLAIM — {n_unsup} claim(s) lack source support")
@@ -397,10 +476,36 @@ def verify(draft_answer: str, chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
             "NO_ANSWER_FROM_CORPUS — the analyst found no relevant information in the retrieved documents",
         )
 
+    # US 6 — Conflicting agent outputs: when two or more retrieved sources
+    # disagree on the same factual topic, the analyst's draft cannot be
+    # fully grounded in any single source. Flag the conflict, cap the
+    # confidence below the LOW_CONFIDENCE threshold, and mark the answer
+    # as not grounded.
+    if conflicts:
+        n_conf = len(conflicts)
+        if n_conf == 1:
+            _add_flag(
+                flags,
+                f"CONFLICTING_SOURCES — 1 cross-source disagreement found: "
+                f"'{conflicts[0]['topic']}' between "
+                f"'{conflicts[0]['source_a']}' and '{conflicts[0]['source_b']}'",
+            )
+        else:
+            topics = ", ".join(f"'{c['topic']}'" for c in conflicts)
+            _add_flag(
+                flags,
+                f"CONFLICTING_SOURCES — {n_conf} cross-source disagreements: {topics}",
+            )
+        # 1 conflict -> 0.55 cap (forces LOW_CONFIDENCE disclaimer),
+        # 2+   -> 0.45 cap (multiple disagreements = even less trust).
+        conflict_cap = 0.55 if n_conf == 1 else 0.45
+        confidence = min(confidence, conflict_cap)
+        grounded = False
+
     log.info(
         "Verifier result: confidence=%.2f (gc=%.2f, aq=%.2f, rc=%.2f), "
-        "grounded=%s, %d flag(s), %d claim(s), %d aspect(s)",
-        confidence, gc, aq, rc, grounded, len(flags), len(claims), len(aspects),
+        "grounded=%s, %d flag(s), %d claim(s), %d aspect(s), %d conflict(s)",
+        confidence, gc, aq, rc, grounded, len(flags), len(claims), len(aspects), len(conflicts),
     )
 
     return {
@@ -412,4 +517,5 @@ def verify(draft_answer: str, chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
         "retrieval_confidence": round(rc, 2),
         "claims": claims,
         "question_aspects": aspects,
+        "conflicts": conflicts,
     }

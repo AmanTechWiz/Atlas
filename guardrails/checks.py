@@ -2,10 +2,10 @@
 
 Satisfies Official US 5 (Governance & Guardrails) and Story 8 of agents.md.
 
-The guardrails are CORPUS-AGNOSTIC — they do not assume the user has uploaded
-HR/compliance/onboarding documents. They run basic safety checks (length,
-injection detection, coherence, spam) that apply to any enterprise document
-set (legal, finance, IT, HR, operations, etc.).
+The guardrails are CORPUS-AGNOSTIC — they do not assume the user has
+uploaded HR/compliance/onboarding documents. They run basic safety
+checks (length, injection detection, empty corpus) that apply to any
+enterprise document set (legal, finance, IT, HR, operations, etc.).
 
 Two public functions:
 
@@ -13,22 +13,25 @@ Two public functions:
     * empty / None queries
     * queries shorter than `MIN_QUERY_LENGTH` characters
     * queries longer than `MAX_QUERY_LENGTH` characters
-    * queries with > `MAX_SPECIAL_CHAR_RATIO` non-alphanumeric characters
-    * queries with > `MAX_REPETITION_RATIO` repeated tokens
     * queries containing common prompt-injection patterns
     * queries against an empty corpus (corpus_size=0)
 
   Returns `{"valid": bool, "reason": str}`. When `valid=False`, the graph
   should not run; `run_query()` returns early with a friendly rejection in
-  `final_answer` and a `GUARDRAIL_REJECTED` log entry.
+  `final_answer` and a `GUARDRAIL` log entry.
 
 - `apply_confidence_guardrail(verification_result, answer, chunks)` - run
   INSIDE `finalize_node` to wrap the answer with:
     * a "Low confidence" disclaimer when `verification_result.confidence < 0.6`
     * a "Sources" footer citing every source file actually used
 
-  Returns the augmented answer string. Replaces the inline disclaimer+footer
-  logic that was previously in `graph/workflow.py`.
+  Returns the augmented answer string.
+
+The legacy special-character ratio and token-repetition checks were
+removed: they produced false positives on legitimate technical queries
+(URLs, regex, code snippets, repeated legal entity names) and added
+complexity without catching real attacks that the injection regex
+already covers.
 """
 
 from __future__ import annotations
@@ -39,8 +42,6 @@ from typing import Any, Dict, List
 
 MIN_QUERY_LENGTH = 5
 MAX_QUERY_LENGTH = 2000
-MAX_SPECIAL_CHAR_RATIO = 0.50
-MAX_REPETITION_RATIO = 0.60
 
 INJECTION_PATTERNS: List[str] = [
     r"ignore (?:all )?(?:previous|prior|above) instructions",
@@ -48,7 +49,7 @@ INJECTION_PATTERNS: List[str] = [
     r"forget (?:all )?(?:previous|prior|above)",
     r"you are now",
     r"act as (?:a|an)",
-    r"pretend (?:to be|you are)",
+    r"pretend (to be|you are)",
     r"system\s*:\s*",
     r"assistant\s*:\s*",
     r"###\s*(?:system|assistant|instruction)",
@@ -67,32 +68,6 @@ INJECTION_PATTERNS: List[str] = [
 ]
 
 _INJECTION_RE = re.compile("|".join(f"(?:{p})" for p in INJECTION_PATTERNS), re.IGNORECASE)
-
-_ALNUM_RE = re.compile(r"[A-Za-z0-9]")
-_WORD_RE = re.compile(r"[A-Za-z]{3,}")
-_WS_RE = re.compile(r"\s+")
-
-
-def _special_char_ratio(text: str) -> float:
-    if not text:
-        return 0.0
-    alnum = len(_ALNUM_RE.findall(text))
-    ws = len(_WS_RE.findall(text))
-    meaningful = alnum + ws
-    if meaningful == 0:
-        return 1.0
-    return 1.0 - (meaningful / len(text))
-
-
-def _repetition_ratio(text: str) -> float:
-    words = _WORD_RE.findall(text.lower())
-    if len(words) < 3:
-        return 0.0
-    counts: Dict[str, int] = {}
-    for w in words:
-        counts[w] = counts.get(w, 0) + 1
-    most_common_count = max(counts.values())
-    return most_common_count / len(words)
 
 
 DISCLAIMER = (
@@ -130,26 +105,6 @@ def validate_input(query: Any, corpus_size: int = 0) -> Dict[str, str]:
         return {
             "valid": False,
             "reason": f"Query is too long (max {MAX_QUERY_LENGTH} characters).",
-        }
-
-    special_ratio = _special_char_ratio(cleaned)
-    if special_ratio > MAX_SPECIAL_CHAR_RATIO:
-        return {
-            "valid": False,
-            "reason": (
-                "Query contains too many special characters (likely spam or "
-                "garbled text). Please rephrase as a plain business question."
-            ),
-        }
-
-    rep_ratio = _repetition_ratio(cleaned)
-    if rep_ratio > MAX_REPETITION_RATIO:
-        return {
-            "valid": False,
-            "reason": (
-                "Query contains excessive repetition. Please rephrase as a "
-                "clear, distinct question."
-            ),
         }
 
     if _INJECTION_RE.search(cleaned):

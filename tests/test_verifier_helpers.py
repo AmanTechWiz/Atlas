@@ -277,6 +277,138 @@ class TestVerifyIntegration(unittest.TestCase):
                     "claims", "question_aspects"):
             self.assertIn(key, result, f"missing key: {key}")
 
+    def test_single_source_retrieval_flag_caps_confidence(self):
+        """When the retriever flags SINGLE_SOURCE_RETRIEVAL, the verifier
+        adds a flag and caps confidence at 0.5 with grounded=False."""
+        import json
+        claims = [_claim("a", "direct")]
+        aspects = [_aspect("q", "answered")]
+        payload = json.dumps({"claims": claims, "question_aspects": aspects, "flags": []})
+        chunks = [
+            {**_chunk("codebase_llmHelp.pdf", 0.80), "_diversity_flag": "SINGLE_SOURCE_RETRIEVAL"},
+            {**_chunk("codebase_llmHelp.pdf", 0.70), "_diversity_flag": "SINGLE_SOURCE_RETRIEVAL"},
+        ]
+        result = self._run_verify("draft", chunks, payload)
+        self.assertIn("SINGLE_SOURCE_RETRIEVAL", " ".join(result["flags"]))
+        self.assertLessEqual(result["confidence"], 0.5)
+        self.assertFalse(result["grounded"])
+
+    def test_conflicting_sources_flag_fires_on_one_conflict(self):
+        """US 6: when the verifier reports a single cross-source conflict,
+        add CONFLICTING_SOURCES flag, cap confidence at 0.55, mark not
+        grounded, and surface the conflict in the result dict."""
+        import json
+        claims = [_claim("a", "direct")]
+        aspects = [_aspect("q", "answered")]
+        conflicts = [{
+            "topic": "parental leave duration",
+            "source_a": "policy_hr.pdf",
+            "claim_a": "12 weeks",
+            "source_b": "compliance_manual.txt",
+            "claim_b": "8 weeks",
+        }]
+        payload = json.dumps({
+            "claims": claims,
+            "question_aspects": aspects,
+            "conflicts": conflicts,
+            "flags": [],
+        })
+        chunks = [_chunk("policy_hr.pdf", 0.80), _chunk("compliance_manual.txt", 0.70)]
+        result = self._run_verify("draft", chunks, payload)
+        self.assertIn("CONFLICTING_SOURCES", " ".join(result["flags"]))
+        self.assertIn("parental leave duration", " ".join(result["flags"]))
+        self.assertLessEqual(result["confidence"], 0.55)
+        self.assertFalse(result["grounded"])
+        self.assertEqual(len(result["conflicts"]), 1)
+        self.assertEqual(result["conflicts"][0]["topic"], "parental leave duration")
+
+    def test_multiple_conflicts_cap_confidence_lower(self):
+        """US 6: 2+ conflicts cap confidence at 0.45 (lower than 1 conflict)."""
+        import json
+        claims = [_claim("a", "direct")]
+        aspects = [_aspect("q", "answered")]
+        conflicts = [
+            {"topic": "leave", "source_a": "A", "claim_a": "12w",
+             "source_b": "B", "claim_b": "8w"},
+            {"topic": "remote work", "source_a": "A", "claim_a": "allowed",
+             "source_b": "B", "claim_b": "not allowed"},
+        ]
+        payload = json.dumps({
+            "claims": claims,
+            "question_aspects": aspects,
+            "conflicts": conflicts,
+            "flags": [],
+        })
+        chunks = [_chunk("A", 0.80), _chunk("B", 0.70)]
+        result = self._run_verify("draft", chunks, payload)
+        self.assertLessEqual(result["confidence"], 0.45)
+        self.assertEqual(len(result["conflicts"]), 2)
+        # The flag should mention both topics.
+        joined = " ".join(result["flags"])
+        self.assertIn("CONFLICTING_SOURCES", joined)
+        self.assertIn("leave", joined)
+        self.assertIn("remote work", joined)
+
+    def test_malformed_conflict_records_are_dropped(self):
+        """Conflict records missing required fields are silently dropped
+        (no flag, no cap, no entry in the result)."""
+        import json
+        claims = [_claim("a", "direct")]
+        aspects = [_aspect("q", "answered")]
+        # Each entry is missing a required field.
+        conflicts = [
+            {},  # all missing
+            {"topic": "x"},  # missing sources/claims
+            {"topic": "x", "source_a": "A", "claim_a": "yes",
+             "source_b": "A", "claim_b": "yes"},  # self-conflict
+        ]
+        payload = json.dumps({
+            "claims": claims,
+            "question_aspects": aspects,
+            "conflicts": conflicts,
+            "flags": [],
+        })
+        chunks = [_chunk("A", 0.80), _chunk("B", 0.70)]
+        result = self._run_verify("draft", chunks, payload)
+        self.assertEqual(result["conflicts"], [])
+        self.assertNotIn("CONFLICTING_SOURCES", " ".join(result["flags"]))
+
+
+class TestNormalizeConflict(unittest.TestCase):
+    """Pure-Python tests for the _normalize_conflict helper."""
+
+    def test_valid_conflict_passes_through(self):
+        c = verifier._normalize_conflict({
+            "topic": "leave",
+            "source_a": "A",
+            "claim_a": "yes",
+            "source_b": "B",
+            "claim_b": "no",
+        })
+        self.assertIsNotNone(c)
+        self.assertEqual(c["topic"], "leave")
+        self.assertEqual(c["source_a"], "A")
+        self.assertEqual(c["claim_b"], "no")
+
+    def test_missing_field_returns_none(self):
+        self.assertIsNone(verifier._normalize_conflict({}))
+        self.assertIsNone(verifier._normalize_conflict({"topic": "x"}))
+        self.assertIsNone(verifier._normalize_conflict({
+            "topic": "x", "source_a": "A", "claim_a": "y",
+            "source_b": "B",  # claim_b missing
+        }))
+
+    def test_non_dict_returns_none(self):
+        self.assertIsNone(verifier._normalize_conflict("not a dict"))
+        self.assertIsNone(verifier._normalize_conflict(None))
+        self.assertIsNone(verifier._normalize_conflict([1, 2, 3]))
+
+    def test_self_conflict_with_identical_claim_is_dropped(self):
+        self.assertIsNone(verifier._normalize_conflict({
+            "topic": "x", "source_a": "A", "claim_a": "yes",
+            "source_b": "A", "claim_b": "yes",
+        }))
+
 
 if __name__ == "__main__":
     unittest.main()

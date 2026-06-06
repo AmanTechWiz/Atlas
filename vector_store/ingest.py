@@ -7,21 +7,24 @@ backends, switched via `EMBEDDING_BACKEND` in .env:
   - ollama   (default) — local, uses Ollama + nomic-embed-text
   - gemini             — Google Gemini embedding API
 
-Three public entry points:
+Each file is auto-classified (resume, policy, contract, …) by
+`agents.document_classifier` and the resulting `doc_type` is stored
+on every chunk as metadata. The retriever uses this label to boost
+matching documents when the user's query targets a specific doc type.
 
-1. `safe_ingest_dir(docs_dir, persist_dir, collection_name, backend)` —
-   ingest every supported file in a directory. Used by the CLI and by
-   dev-mode ingestion. Full replace of the collection.
+Three public entry points (single application collection, no sessions):
 
-2. `safe_ingest_files(file_paths, persist_dir, collection_name, backend)` —
-   ingest a specific list of file paths. Full replace of the collection.
-   Used by the Streamlit upload UI when the user explicitly clicks
-   "Reset Session" + re-uploads.
+1. `ingest_dir(docs_dir, persist_dir, collection_name, backend)` —
+   ingest every supported file in a directory. Used by the CLI.
+   Full replace of the collection.
 
-3. `add_files_to_collection(file_paths, persist_dir, collection_name, backend)` —
-   append the given files' chunks to an existing (or new) collection.
-   Existing data is preserved. Used by the Streamlit upload UI for
-   the per-session "add another file" flow.
+2. `ingest_files(file_paths, persist_dir, collection_name, backend)` —
+   ingest a specific list of file paths. Used by the Streamlit upload UI.
+   Appends to the existing collection (preserves prior data).
+
+3. `reset_collection(persist_dir, collection_name, backend)` —
+   drop the entire collection. Used by the UI "Reset Knowledge Base"
+   button.
 
 Why no safe-swap: chromadb 1.5.x + langchain-chroma has a bug where
 `Chroma.from_documents` to a temp dir, followed by a rename into the
@@ -70,6 +73,8 @@ from langchain_core.documents import Document
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from lib.document_classifier import classify_document
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -80,7 +85,11 @@ log = logging.getLogger("ingest")
 
 DEFAULT_DOCS_DIR = "docs"
 DEFAULT_PERSIST_DIR = "chroma_db"
-DEFAULT_COLLECTION = "enterprise_docs"
+# Canonical collection name — keep in sync with agents/retriever.py
+# (DEFAULT_COLLECTION_NAME) and ui/app.py (COLLECTION_NAME). All three must
+# reference the same string or the CLI will write to a collection the
+# runtime never reads from.
+DEFAULT_COLLECTION = "atlas_corpus"
 DEFAULT_OLLAMA_MODEL = "nomic-embed-text"
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
 
@@ -103,9 +112,12 @@ def _load_one(path: Path) -> List[Document]:
         return []
 
     docs = loader.load()
+    first_text = (docs[0].page_content if docs else "")[:2000]
+    doc_type = classify_document(path.name, first_text)
     for d in docs:
         meta = dict(d.metadata or {})
         meta["source"] = path.name
+        meta["doc_type"] = doc_type
         meta.setdefault("page", 0)
         if isinstance(meta["page"], str):
             try:
@@ -232,67 +244,20 @@ def _report_chunk_counts(chunks: List[Document]) -> None:
         log.info("  - %s: %d chunk(s)", src, n)
 
 
-def safe_ingest_files(
+def ingest_files(
     file_paths: List[Path],
     persist_dir: Path,
     collection_name: str,
     backend: str,
 ) -> int:
-    """Ingest a specific list of files into a ChromaDB collection.
-
-    Full replace of any existing collection at `persist_dir`. Writes
-    directly to the target dir via `Chroma.add_documents` (no safe-swap
-    rename) to avoid a chromadb 1.5.x bug where renamed HNSW indices
-    fall out of sync with SQLite metadata.
-
-    WARNING: this is a full replace. For the "add another file to the
-    existing corpus" use case (e.g. Streamlit upload), use
-    `add_files_to_collection` instead — it preserves existing data.
-    """
-    docs = load_documents_from_files(file_paths)
-    chunks = split_documents(docs)
-    if not chunks:
-        log.warning("No chunks to ingest.")
-        return 0
-
-    embeddings = _get_embeddings(backend)
-    persist_dir = Path(persist_dir)
-    persist_dir.mkdir(parents=True, exist_ok=True)
-
-    log.info("Replacing collection %s at %s ...", collection_name, persist_dir)
-    # Full replace: drop the existing collection (if any), then create
-    # it fresh and add the new chunks.
-    vs = _open_collection(persist_dir, embeddings, collection_name)
-    try:
-        vs.delete_collection()
-    except Exception:
-        pass
-    vs = _open_collection(persist_dir, embeddings, collection_name)
-    vs.add_documents(chunks)
-    _report_chunk_counts(chunks)
-    return len(chunks)
-
-
-def add_files_to_collection(
-    file_paths: List[Path],
-    persist_dir: Path,
-    collection_name: str,
-    backend: str,
-) -> int:
-    """Add the given files' chunks to an existing (or new) collection.
-
-    Appends new chunks via `Chroma.add_documents` if the collection
-    already exists; creates the collection fresh otherwise. Existing
-    data is preserved. Writes directly to `persist_dir` (no safe-swap
-    rename).
+    """Ingest a specific list of files. Appends to the existing collection
+    (preserves prior data). Writes directly to `persist_dir` via
+    `Chroma.add_documents` (no safe-swap rename) to avoid a chromadb
+    1.5.x bug where renamed HNSW indices fall out of sync with SQLite
+    metadata.
 
     Returns the number of NEW chunks added (not the total in the
-    collection).
-
-    Used by the Streamlit upload UI for per-session ingestion. The
-    caller is responsible for invalidating any cached Chroma handle
-    after this function returns (e.g. by calling
-    `agents.retriever.set_active_collection`).
+    collection). Used by the Streamlit upload UI.
     """
     docs = load_documents_from_files(file_paths)
     chunks = split_documents(docs)
@@ -310,33 +275,26 @@ def add_files_to_collection(
             "Collection %s already has %d chunk(s); appending %d new chunk(s).",
             collection_name, existing_count, len(chunks),
         )
-        vs = _open_collection(persist_dir, embeddings, collection_name)
-        vs.add_documents(chunks)
-        _report_chunk_counts(chunks)
-        return len(chunks)
-
-    log.info(
-        "Collection %s does not exist yet; creating it with %d chunk(s).",
-        collection_name, len(chunks),
-    )
+    else:
+        log.info(
+            "Collection %s does not exist yet; creating it with %d chunk(s).",
+            collection_name, len(chunks),
+        )
     vs = _open_collection(persist_dir, embeddings, collection_name)
     vs.add_documents(chunks)
     _report_chunk_counts(chunks)
     return len(chunks)
 
 
-def safe_ingest_dir(
+def ingest_dir(
     docs_dir: Path,
     persist_dir: Path,
     collection_name: str,
     backend: str,
 ) -> int:
-    """Ingest every supported file in `docs_dir` into a ChromaDB collection.
-
-    Full replace of any existing collection at `persist_dir`. Used by
-    the CLI and by dev-mode ingestion. Returns the number of chunks
-    ingested. Writes directly to `persist_dir` (no safe-swap rename).
-    """
+    """Ingest every supported file in `docs_dir` into the single application
+    collection. Full replace. Used by the CLI. Writes directly to
+    `persist_dir` (no safe-swap rename)."""
     docs = load_documents(docs_dir)
     chunks = split_documents(docs)
     if not chunks:
@@ -359,12 +317,25 @@ def safe_ingest_dir(
     return len(chunks)
 
 
-def delete_collection(persist_dir: Path, collection_name: str) -> bool:
-    """Delete a ChromaDB collection from disk. Returns True if a collection
-    was actually removed. Used by the UI to clear a per-session collection
-    on Reset."""
+def reset_collection(persist_dir: Path, collection_name: str, backend: str = None) -> bool:
+    """Drop the entire application collection. Used by the UI "Reset
+    Knowledge Base" button. Returns True if the collection was actually
+    removed (False if it didn't exist)."""
     persist_dir = Path(persist_dir)
     if not persist_dir.exists():
+        return False
+    try:
+        backend = backend or os.getenv("EMBEDDING_BACKEND", "ollama")
+        vs = Chroma(
+            persist_directory=str(persist_dir),
+            embedding_function=_get_embeddings(backend),
+            collection_name=collection_name,
+        )
+        vs.delete_collection()
+        log.info("Deleted collection %s from %s", collection_name, persist_dir)
+        return True
+    except Exception as e:
+        log.warning("Failed to delete collection %s: %s", collection_name, e)
         return False
     try:
         vs = Chroma(
@@ -405,7 +376,7 @@ def main() -> int:
     docs_dir = Path(args.docs_dir)
     persist_dir = Path(args.persist_dir)
     try:
-        n = safe_ingest_dir(docs_dir, persist_dir, args.collection, args.embedding_backend)
+        n = ingest_dir(docs_dir, persist_dir, args.collection, args.embedding_backend)
     except FileNotFoundError as e:
         log.error("%s", e)
         return 2

@@ -3,21 +3,21 @@
 Official US 1+2+3+5 flow:
   START -> orchestrate -> retrieve -> analyze -> verify
                                                   |
-                                  confidence < 0.6 ?
-                                  /                 \
-                              yes                   no
-                              /                      \
-                  low_confidence                   finalize
-                              \                     /
-                               `-> finalize <-'
-                                       |
-                                  memory_node
-                                       |
-                                      END
+                                   confidence < 0.6 ?
+                                   /                 \
+                               yes                   no
+                               /                      \
+                   low_confidence                   finalize
+                               \                     /
+                                `-> finalize <-'
+                                        |
+                                   memory_node
+                                        |
+                                       END
 
 US 1: real RAG pipeline (orchestrate, retrieve, analyze, finalize).
 US 2: every node calls EvalLogger to write a structured JSON entry
-      to logs/eval_<session_id>.json. MemoryAgent is part of the
+      to logs/eval_<timestamp>.json. MemoryAgent is part of the
       architecture; its node is the last step in the flow.
 US 3: real Verifier node replaces the stub verification_result.
       Conditional edge adds a low-confidence disclaimer to the
@@ -28,6 +28,14 @@ US 5: input guardrail runs BEFORE the graph (`validate_input` in
       guardrail (`apply_confidence_guardrail` in `guardrails.checks`)
       runs INSIDE `finalize_node` to wrap the answer with the
       low-confidence disclaimer and the sources footer.
+
+Intent-aware design (2026-06-06 refactor):
+  - The orchestrator classifies the query into one of four intents
+    (single_document | cross_document | comparison | corpus_summary)
+    and stores `intent` + `target_doc_types` in AgentState.
+  - The retriever uses `intent` + `target_doc_types` to choose a
+    retrieval strategy (see agents/retriever.py docstring).
+  - Single application-level corpus; no per-session collections.
 """
 
 from __future__ import annotations
@@ -48,24 +56,29 @@ warnings.filterwarnings(
 from dotenv import load_dotenv
 from langgraph.graph import END, START, StateGraph
 
-from agents._api_errors import friendly_api_error
 from agents.analyst import analyze
-from agents.memory import MemoryAgent
+from agents.memory import MemoryAgent, get_default_memory
 from agents.orchestrator import plan
-from agents.retriever import get_corpus_size, retrieve
+from agents.retriever import get_corpus_size, get_indexed_doc_types, retrieve
 from agents.verifier import verify
 from evaluation.logger import EvalLogger
 from guardrails.checks import apply_confidence_guardrail, validate_input
+from lib.api_errors import friendly_api_error
+from lib.query_rewriter import rewrite_query
 
 load_dotenv(dotenv_path=str(Path(__file__).resolve().parent.parent / ".env"), override=True)
 
 log = logging.getLogger("workflow")
 
 CONFIDENCE_THRESHOLD = 0.6
+DEFAULT_K = 5
 
 
 class AgentState(TypedDict, total=False):
     query: str
+    search_query: str
+    intent: str
+    target_doc_types: List[str]
     plan: List[str]
     retrieved_chunks: List[Dict[str, Any]]
     draft_answer: str
@@ -98,15 +111,30 @@ def _get_logger(state: AgentState) -> Optional[EvalLogger]:
 def orchestrate_node(state: AgentState) -> Dict[str, Any]:
     elog = _get_logger(state)
     try:
-        memory = state.get("memory")
+        memory = state.get("memory") or get_default_memory()
         session_context = memory.get_context() if memory is not None else ""
-        plan_steps = plan(state["query"], session_context=session_context)
+        available = get_indexed_doc_types()
+        orchestration = plan(
+            state["query"],
+            session_context=session_context,
+            available_doc_types=available,
+        )
+        intent = orchestration["intent"]
+        target_doc_types = orchestration.get("target_doc_types") or []
+        plan_steps = orchestration["plan"]
         if elog is not None:
             elog.log_plan(plan_steps)
         return _ok_node(
             state, "ORCHESTRATOR",
-            {"plan": plan_steps},
-            f"produced {len(plan_steps)}-step plan (memory: {len(memory) if memory else 0} turn(s))",
+            {
+                "intent": intent,
+                "target_doc_types": target_doc_types,
+                "plan": plan_steps,
+            },
+            (
+                f"intent={intent}, targets={target_doc_types or '[]'}, "
+                f"{len(plan_steps)} plan step(s), memory={len(memory) if memory else 0} turn(s)"
+            ),
         )
     except Exception as e:
         log.exception("Orchestrator failed")
@@ -115,22 +143,104 @@ def orchestrate_node(state: AgentState) -> Dict[str, Any]:
             elog.log_failure(api_msg, "ORCHESTRATOR")
         return _ok_node(
             state, "ORCHESTRATOR",
-            {"plan": [], "error": f"orchestrator_failed: {e}", "api_error": api_msg},
+            {
+                "intent": "single_document",
+                "target_doc_types": [],
+                "plan": [],
+                "error": f"orchestrator_failed: {e}",
+                "api_error": api_msg,
+            },
             f"FAILED — {api_msg}",
         )
+
+
+def rewrite_query_node(state: AgentState) -> Dict[str, Any]:
+    """Memory-aware query reformulation.
+
+    Resolves pronouns / context-dependent references in the user's
+    latest question using the prior session context. The rewritten
+    query is what the Retriever actually embeds; the original query
+    is preserved on state["query"] and used by the Orchestrator,
+    Analyst, and Verifier.
+
+    Sits between Orchestrator and Retriever in the graph:
+        orchestrate -> rewrite_query -> retrieve -> analyze -> ...
+
+    Failure-safe: any error or empty memory context returns the
+    original query unchanged, so this node can never break the
+    pipeline.
+    """
+    elog = _get_logger(state)
+    memory = state.get("memory") or get_default_memory()
+    raw_query = state.get("query", "")
+    if not raw_query:
+        return _ok_node(
+            state, "REWRITE",
+            {"search_query": ""},
+            "skipped — empty query",
+        )
+
+    memory_context = memory.get_context() if memory is not None else ""
+    if not memory_context:
+        return _ok_node(
+            state, "REWRITE",
+            {"search_query": raw_query},
+            "skipped — no prior session context",
+        )
+
+    try:
+        rewritten = rewrite_query(raw_query, memory_context)
+    except Exception as e:
+        log.warning("rewrite_query_node failed: %s", e)
+        rewritten = raw_query
+
+    if elog is not None:
+        try:
+            elog.log_rewrite(
+                original=raw_query,
+                rewritten=rewritten,
+                had_memory=bool(memory_context),
+            )
+        except AttributeError:
+            pass
+
+    if rewritten == raw_query:
+        detail = "kept original query (no rewrite needed or fallback)"
+    else:
+        detail = f"rewrote query for retrieval: {rewritten[:80]!r}"
+
+    return _ok_node(
+        state, "REWRITE",
+        {"search_query": rewritten},
+        detail,
+    )
 
 
 def retrieve_node(state: AgentState) -> Dict[str, Any]:
     elog = _get_logger(state)
     try:
-        chunks = retrieve(state["query"], k=5)
+        search_query = state.get("search_query") or state["query"]
+        intent = state.get("intent") or "single_document"
+        target_doc_types = list(state.get("target_doc_types") or [])
+        chunks = retrieve(
+            search_query,
+            k=DEFAULT_K,
+            intent=intent,
+            target_doc_types=target_doc_types,
+        )
         sources = sorted({c["source"] for c in chunks})
+        strategies = sorted({c.get("retrieval_strategy", "?") for c in chunks})
         detail = (
-            f"{len(chunks)} chunk(s) from {len(sources)} source(s): "
-            f"{', '.join(sources) if sources else '(none)'}"
+            f"{len(chunks)} chunk(s) from {len(sources)} source(s) "
+            f"using intent={intent}, targets={target_doc_types or '[]'}: "
+            f"{', '.join(sources) if sources else '(none)'} "
+            f"[strategies: {', '.join(strategies)}]"
         )
         if elog is not None:
-            elog.log_retrieval(chunks)
+            try:
+                elog.log_retrieval(chunks, query_used=search_query)
+            except TypeError:
+                elog.log_retrieval(chunks)
         return _ok_node(state, "RETRIEVER", {"retrieved_chunks": chunks}, detail)
     except Exception as e:
         log.exception("Retriever failed")
@@ -264,20 +374,20 @@ def finalize_node(state: AgentState) -> Dict[str, Any]:
 
 
 def memory_node(state: AgentState) -> Dict[str, Any]:
-    """Append the just-completed turn to the session memory.
+    """Append the just-completed turn to the memory.
 
     US 2 (Memory Agent) — invoked at the END of the graph (after finalize).
     Reads `final_answer`, `retrieved_chunks`, and `query` from state, then
     appends a (query, answer, sources) entry to the MemoryAgent. Subsequent
-    calls to `run_query()` within the same session will inject this history
-    into the Orchestrator's planning step.
+    calls to `run_query()` will inject this history into the Orchestrator's
+    planning step.
     """
-    memory = state.get("memory")
+    memory = state.get("memory") or get_default_memory()
     if memory is None:
         return _ok_node(
             state, "MEMORY",
             {},
-            "skipped — no memory instance in state",
+            "skipped — no memory instance available",
         )
     chunks = state.get("retrieved_chunks") or []
     sources = sorted({c.get("source", "unknown") for c in chunks})
@@ -293,6 +403,7 @@ def memory_node(state: AgentState) -> Dict[str, Any]:
 def build_graph():
     g = StateGraph(AgentState)
     g.add_node("orchestrate", orchestrate_node)
+    g.add_node("rewrite_query", rewrite_query_node)
     g.add_node("retrieve", retrieve_node)
     g.add_node("analyze", analyze_node)
     g.add_node("verify", verify_node)
@@ -300,7 +411,8 @@ def build_graph():
     g.add_node("finalize", finalize_node)
     g.add_node("memory", memory_node)
     g.add_edge(START, "orchestrate")
-    g.add_edge("orchestrate", "retrieve")
+    g.add_edge("orchestrate", "rewrite_query")
+    g.add_edge("rewrite_query", "retrieve")
     g.add_edge("retrieve", "analyze")
     g.add_edge("analyze", "verify")
     g.add_conditional_edges(
@@ -330,7 +442,7 @@ def _get_corpus_size() -> int:
 def run_query(query: str, memory: Optional[MemoryAgent] = None) -> AgentState:
     """Run the full US 1+2+3+5 pipeline. Returns the populated AgentState.
 
-    Side effect: writes a structured JSON log to logs/eval_<session_id>.json
+    Side effect: writes a structured JSON log to logs/eval_<timestamp>.json
     with one entry per agent stage plus a final SUMMARY entry.
 
     US 5 guardrail: if `validate_input(query)` rejects, the graph is
@@ -338,13 +450,9 @@ def run_query(query: str, memory: Optional[MemoryAgent] = None) -> AgentState:
     `GUARDRAIL` entry is written to the log file. SUMMARY is NOT written
     in that case (no real query to summarize).
 
-    `corpus_size` is passed to the guardrail so it can reject queries when
-    the user has not yet uploaded any documents.
-
-    `memory` is an optional MemoryAgent. If provided, the orchestrator
-    receives prior session context (US 2 Memory Agent) and the turn is
-    appended to memory at the end of the run. Reuse the same MemoryAgent
-    instance across calls for multi-turn conversations.
+    `memory` is an optional MemoryAgent. If omitted, the process-wide
+    singleton from `get_default_memory()` is used so multi-turn
+    conversations still work across re-runs.
     """
     eval_logger = EvalLogger()
     eval_logger.log_query_start(query)
@@ -360,6 +468,8 @@ def run_query(query: str, memory: Optional[MemoryAgent] = None) -> AgentState:
         )
         result: AgentState = {
             "query": query,
+            "intent": "single_document",
+            "target_doc_types": [],
             "plan": [],
             "retrieved_chunks": [],
             "draft_answer": "",
@@ -387,6 +497,9 @@ def run_query(query: str, memory: Optional[MemoryAgent] = None) -> AgentState:
 
     initial: AgentState = {
         "query": query,
+        "search_query": query,
+        "intent": "single_document",
+        "target_doc_types": [],
         "plan": [],
         "retrieved_chunks": [],
         "draft_answer": "",
@@ -399,7 +512,7 @@ def run_query(query: str, memory: Optional[MemoryAgent] = None) -> AgentState:
         "needs_disclaimer": False,
         "eval_logger": eval_logger,
         "query_start_mono": time.monotonic(),
-        "memory": memory,
+        "memory": memory or get_default_memory(),
     }
     result = app.invoke(initial)
     result["log_path"] = str(eval_logger.log_path)
@@ -421,8 +534,11 @@ def run_query(query: str, memory: Optional[MemoryAgent] = None) -> AgentState:
     )
 
     log.info(
-        "run_query complete: %d plan step(s), %d chunk(s), final_answer %d chars, "
-        "verification confidence=%.2f grounded=%s, %d ms, error=%s, log=%s",
+        "run_query complete: intent=%s, targets=%s, %d plan step(s), %d chunk(s), "
+        "final_answer %d chars, verification confidence=%.2f grounded=%s, %d ms, "
+        "error=%s, log=%s",
+        result.get("intent"),
+        result.get("target_doc_types"),
         len(plan_steps),
         len(chunks),
         len(final_answer),

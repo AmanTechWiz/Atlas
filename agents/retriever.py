@@ -1,32 +1,43 @@
-"""RetrieverAgent — queries ChromaDB and returns relevant chunks.
+"""RetrieverAgent — intent-aware retrieval over ChromaDB.
 
-Acceptance criteria (agents.md Story 2):
-- Returns 3-5 relevant chunks
-- Each chunk has source attribution
-- Low-relevance chunks are filtered
+The retriever is query-aware: the orchestrator classifies each user
+query into one of four intents and passes the intent + target doc
+types to `retrieve()`. The retriever then chooses the right strategy:
 
-The relevance score is a backend-aware normalized value in [0, 1] where
-1.0 = perfect match.
+  - single_document: 70-90% chunks from the target document, 10-30%
+    supporting chunks from other documents. Filter by `doc_type`
+    metadata for the target. Example for k=4: `resume, resume, resume,
+    requirements`.
+  - comparison: balanced — top chunks from EACH target doc type so
+    the synthesizer can compare. Example for k=4: `resume, resume,
+    requirements, requirements`.
+  - cross_document: balanced — top chunks from each named doc type,
+    or one per source if no doc type was named.
+  - corpus_summary: one representative chunk from EVERY uploaded
+    document (source-balanced), then fill the rest with global top-k.
 
-For Gemini embeddings ChromaDB stores them normalized and uses cosine
-distance natively, so relevance = 1 - distance (distance in [0, 2]).
+Source-name mention detection is also applied: a query like
+"tell me about the resume" gets a mention boost on the file
+`College resume.pdf` (resolved via doc_type lookup of the
+mentioned source).
 
-For Ollama embeddings ChromaDB uses L2 (squared euclidean) distance and
-the vectors are unnormalized (nomic-embed-text returns vectors of norm
-~22.8, so n^2 ~ 520). We convert L2^2 to a pseudo-cosine using the
-identity cos = 1 - L2^2 / (2 * n^2), then clamp to [0, 1]. This gives
-scores in the [0, 1] range with real dynamic range (0.5 - 0.8 for the
-top-5 of a typical query), so the UI can show meaningful badges and
-the min-relevance threshold filters out truly unrelated chunks.
+Each returned chunk has: text, source, page, relevance_score,
+doc_type, retrieval_strategy.
+
+A `SINGLE_SOURCE_RETRIEVAL` flag is attached to every chunk when
+the corpus has multiple sources but the result came from only one.
+The verifier reads this flag and caps confidence at 0.5 with a
+clear `SINGLE_SOURCE_RETRIEVAL` flag.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import re
 import warnings
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 warnings.filterwarnings(
     "ignore",
@@ -53,51 +64,31 @@ load_dotenv(dotenv_path=str(Path(__file__).resolve().parent.parent / ".env"), ov
 
 log = logging.getLogger("retriever")
 
-PERSIST_DIR = Path(__file__).resolve().parent.parent / "chroma_db"
-DEFAULT_COLLECTION_NAME = "enterprise_docs"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PERSIST_DIR = PROJECT_ROOT / "chroma_db"
+DEFAULT_COLLECTION_NAME = "atlas_corpus"
 DEFAULT_K = 5
 
 MIN_RELEVANCE_OLLAMA = 0.50
 MIN_RELEVANCE_GEMINI = 0.30
 
 # Ollama's nomic-embed-text returns 768-dim vectors with L2 norm ~22.8
-# (measured empirically). Used to convert ChromaDB's L2^2 distance into
-# a pseudo-cosine similarity. If you swap to a different embed model
-# (e.g. mxbai-embed-large, all-minilm), update this constant.
 _OLLAMA_EMBED_NORM_SQ = 520.0
 
+# Single application-level vector store. No per-session collections.
 _vectorstore = None
-_active_persist_dir: Path = PERSIST_DIR
-_active_collection_name: str = DEFAULT_COLLECTION_NAME
 
 
-def set_active_collection(collection_name: str, persist_dir: Path = None) -> None:
-    """Switch the retriever to a different ChromaDB collection.
+# --------------------------------------------------------------------------- #
+# Public API
+# --------------------------------------------------------------------------- #
 
-    Used by the Streamlit UI to give each user session its own collection
-    (and optional persist directory) so uploaded documents are isolated
-    across sessions. After calling this, the next `retrieve()` call will
-    create a fresh Chroma handle pointing at the new collection.
-
-    Pass `persist_dir` to use a non-default directory (one per session).
-    When `persist_dir` is None, the default `./chroma_db/` is used.
-    """
-    global _active_persist_dir, _active_collection_name, _vectorstore
-    _active_persist_dir = Path(persist_dir) if persist_dir is not None else PERSIST_DIR
-    _active_collection_name = collection_name
-    _vectorstore = None
-    log.info(
-        "Retriever switched to collection=%s persist_dir=%s",
-        _active_collection_name, _active_persist_dir,
-    )
+def get_persist_dir() -> Path:
+    return PERSIST_DIR
 
 
-def get_active_collection_name() -> str:
-    return _active_collection_name
-
-
-def get_active_persist_dir() -> Path:
-    return _active_persist_dir
+def get_default_collection_name() -> str:
+    return DEFAULT_COLLECTION_NAME
 
 
 def _get_embeddings():
@@ -123,19 +114,27 @@ def _is_ollama() -> bool:
 
 
 def _get_vectorstore():
+    """Lazy-init the single Chroma handle. Re-opens on every call to
+    pick up writes that happened since the last retrieval."""
     global _vectorstore
-    if _vectorstore is None:
-        if not _active_persist_dir.exists():
-            raise FileNotFoundError(
-                f"ChromaDB not found at {_active_persist_dir}. "
-                f"Run vector_store/ingest.py first or upload documents via the UI."
-            )
-        _vectorstore = Chroma(
-            persist_directory=str(_active_persist_dir),
-            embedding_function=_get_embeddings(),
-            collection_name=_active_collection_name,
+    if not PERSIST_DIR.exists():
+        raise FileNotFoundError(
+            f"ChromaDB not found at {PERSIST_DIR}. "
+            f"Upload documents via the UI to create it."
         )
+    _vectorstore = Chroma(
+        persist_directory=str(PERSIST_DIR),
+        embedding_function=_get_embeddings(),
+        collection_name=DEFAULT_COLLECTION_NAME,
+    )
     return _vectorstore
+
+
+def invalidate_cache() -> None:
+    """Drop the cached Chroma handle. Call after writes to ensure the
+    next read sees the latest data."""
+    global _vectorstore
+    _vectorstore = None
 
 
 def _distance_to_relevance(distance: float) -> float:
@@ -145,48 +144,426 @@ def _distance_to_relevance(distance: float) -> float:
     return max(0.0, 1.0 - distance)
 
 
-def retrieve(query: str, k: int = DEFAULT_K) -> List[Dict[str, Any]]:
-    """Return top-k chunks for the query as a list of dicts.
+def _min_relevance() -> float:
+    return MIN_RELEVANCE_OLLAMA if _is_ollama() else MIN_RELEVANCE_GEMINI
 
-    Each dict has: text, source, page, relevance_score, _distance.
-    Chunks below the backend-specific minimum relevance are filtered out.
-    """
-    vs = _get_vectorstore()
-    raw = vs.similarity_search_with_score(query, k=k)
 
-    min_rel = MIN_RELEVANCE_OLLAMA if _is_ollama() else MIN_RELEVANCE_GEMINI
+def _chunk_identity(chunk: Dict[str, Any]) -> Tuple[str, Any, str]:
+    return (
+        str(chunk.get("source", "unknown")),
+        chunk.get("page", 0),
+        chunk.get("text", ""),
+    )
 
+
+def _chunk_from_doc(doc: Any, distance: float) -> Dict[str, Any]:
+    relevance = _distance_to_relevance(float(distance))
+    return {
+        "text": doc.page_content,
+        "source": doc.metadata.get("source", "unknown"),
+        "page": doc.metadata.get("page", 0),
+        "doc_type": doc.metadata.get("doc_type", "general"),
+        "relevance_score": round(relevance, 4),
+        "_distance": round(float(distance), 4),
+    }
+
+
+def _chunks_from_raw(
+    raw: Sequence[Tuple[Any, float]],
+    *,
+    min_relevance: Optional[float],
+) -> List[Dict[str, Any]]:
     chunks: List[Dict[str, Any]] = []
     for doc, distance in raw:
-        relevance = _distance_to_relevance(distance)
-        if relevance < min_rel:
+        chunk = _chunk_from_doc(doc, distance)
+        if min_relevance is not None and chunk["relevance_score"] < min_relevance:
             continue
-        chunks.append(
-            {
-                "text": doc.page_content,
-                "source": doc.metadata.get("source", "unknown"),
-                "page": doc.metadata.get("page", 0),
-                "relevance_score": round(relevance, 4),
-                "_distance": round(distance, 4),
-            }
+        chunks.append(chunk)
+    return chunks
+
+
+# --------------------------------------------------------------------------- #
+# Corpus introspection
+# --------------------------------------------------------------------------- #
+
+def _get_indexed_sources(vs: Any) -> List[str]:
+    try:
+        data = vs._collection.get(include=["metadatas"])
+    except Exception as e:
+        log.warning("Could not inspect collection sources: %s", e)
+        return []
+
+    sources = {
+        str(meta.get("source", "")).strip()
+        for meta in data.get("metadatas", []) or []
+        if meta and str(meta.get("source", "")).strip()
+    }
+    return sorted(sources)
+
+
+def _get_indexed_doc_types(vs: Any) -> List[str]:
+    try:
+        data = vs._collection.get(include=["metadatas"])
+    except Exception as e:
+        log.warning("Could not inspect doc types: %s", e)
+        return []
+
+    types = {
+        str(meta.get("doc_type", "")).strip()
+        for meta in data.get("metadatas", []) or []
+        if meta and str(meta.get("doc_type", "")).strip()
+    }
+    return sorted(types)
+
+
+# --------------------------------------------------------------------------- #
+# Mention detection (used as a tie-breaker inside single_document)
+# --------------------------------------------------------------------------- #
+
+def _source_aliases(source: str) -> List[str]:
+    path = Path(source)
+    stem = path.stem.lower()
+    aliases = {source.lower(), path.name.lower()}
+    if len(stem) >= 3:
+        aliases.update({
+            stem,
+            stem.replace("_", " "),
+            stem.replace("-", " "),
+        })
+        words = stem.replace("_", " ").replace("-", " ").split()
+        if len(words) > 1:
+            for w in words:
+                if len(w) >= 4 and w not in {"file", "text", "document", "upload"}:
+                    aliases.add(w)
+    return sorted(a for a in aliases if a)
+
+
+def _query_mentions_alias(query: str, alias: str) -> bool:
+    if "." in alias or "_" in alias or "-" in alias or " " in alias:
+        return alias in query
+    return bool(re.search(rf"\b{re.escape(alias)}\b", query))
+
+
+def _mentioned_sources(query: str, sources: Sequence[str]) -> List[str]:
+    q = (query or "").lower()
+    mentioned = []
+    for source in sources:
+        if any(_query_mentions_alias(q, alias) for alias in _source_aliases(source)):
+            mentioned.append(source)
+    return mentioned
+
+
+# --------------------------------------------------------------------------- #
+# Search helpers
+# --------------------------------------------------------------------------- #
+
+def _similarity_search_by_vector(
+    vs: Any,
+    query_embedding: Optional[List[float]],
+    query: str,
+    *,
+    k: int,
+    doc_type: Optional[str] = None,
+    source: Optional[str] = None,
+) -> List[Tuple[Any, float]]:
+    metadata_filter: Dict[str, Any] = {}
+    if doc_type:
+        metadata_filter["doc_type"] = doc_type
+    if source:
+        metadata_filter["source"] = source
+    if not metadata_filter:
+        metadata_filter = None  # type: ignore
+    if query_embedding is not None:
+        return vs.similarity_search_by_vector_with_relevance_scores(
+            query_embedding, k=k, filter=metadata_filter
+        )
+    return vs.similarity_search_with_score(query, k=k, filter=metadata_filter)
+
+
+def _embed_query_once(vs: Any, query: str) -> Optional[List[float]]:
+    embeddings = getattr(vs, "_embedding_function", None)
+    if embeddings is None:
+        return None
+    try:
+        return embeddings.embed_query(query)
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# Intent-aware retrieval strategies
+# --------------------------------------------------------------------------- #
+
+def _retrieve_targeted(
+    vs: Any,
+    query: str,
+    *,
+    k: int,
+    target_doc_types: Sequence[str],
+    sources: Sequence[str],
+    min_relevance: float,
+) -> List[Dict[str, Any]]:
+    """single_document intent: 70-90% target + 10-30% supporting.
+
+    The target document is the primary focus, but a small slice of
+    supporting chunks from OTHER documents is added so the analyst
+    has cross-context if the user's question straddles documents
+    (e.g. "tell me about the resume" might want a single supporting
+    chunk from another doc for context).
+
+    Target behavior for k=4, single target: ~3 target + ~1 supporting.
+    """
+    query_embedding = _embed_query_once(vs, query)
+    selected: List[Dict[str, Any]] = []
+    seen = set()
+
+    targets = list(target_doc_types) if target_doc_types else []
+
+    # If the user didn't name a doc_type, try to detect a file mention.
+    if not targets:
+        mentioned = _mentioned_sources(query, sources)
+        if mentioned:
+            try:
+                data = vs._collection.get(include=["metadatas"])
+                for meta in data.get("metadatas", []) or []:
+                    if meta and meta.get("source") == mentioned[0] and meta.get("doc_type"):
+                        targets = [str(meta["doc_type"])]
+                        break
+            except Exception:
+                pass
+        if not targets and mentioned:
+            for src in mentioned[:1]:
+                raw = _similarity_search_by_vector(
+                    vs, query_embedding, query, k=k, source=src
+                )
+                for chunk in _chunks_from_raw(raw, min_relevance=min_relevance):
+                    key = _chunk_identity(chunk)
+                    if key in seen:
+                        continue
+                    chunk["retrieval_strategy"] = "targeted_source"
+                    selected.append(chunk)
+                    seen.add(key)
+            selected.sort(key=lambda c: c.get("relevance_score", 0.0), reverse=True)
+            return selected[:k]
+
+    if not targets:
+        raw = _similarity_search_by_vector(vs, query_embedding, query, k=k)
+        chunks = _chunks_from_raw(raw, min_relevance=min_relevance)
+        for c in chunks:
+            c["retrieval_strategy"] = "fallback_global"
+        return chunks
+
+    target_dt = targets[0]
+    n_target = max(1, int(round(k * 0.8)))
+    n_supporting = max(0, k - n_target)
+
+    raw = _similarity_search_by_vector(
+        vs, query_embedding, query, k=n_target + 2, doc_type=target_dt
+    )
+    for chunk in _chunks_from_raw(raw, min_relevance=min_relevance)[:n_target]:
+        key = _chunk_identity(chunk)
+        if key in seen:
+            continue
+        chunk["retrieval_strategy"] = "targeted_doc_type"
+        selected.append(chunk)
+        seen.add(key)
+
+    if n_supporting > 0 and len(selected) < k:
+        raw = _similarity_search_by_vector(vs, query_embedding, query, k=k * 3)
+        supporting_added = 0
+        for chunk in _chunks_from_raw(raw, min_relevance=min_relevance):
+            if chunk.get("doc_type") == target_dt:
+                continue
+            key = _chunk_identity(chunk)
+            if key in seen:
+                continue
+            chunk["retrieval_strategy"] = "targeted_supporting"
+            selected.append(chunk)
+            seen.add(key)
+            supporting_added += 1
+            if supporting_added >= n_supporting:
+                break
+
+    selected.sort(key=lambda c: c.get("relevance_score", 0.0), reverse=True)
+    return selected[:k]
+
+
+def _retrieve_balanced(
+    vs: Any,
+    query: str,
+    *,
+    k: int,
+    target_doc_types: Sequence[str],
+    sources: Sequence[str],
+    min_relevance: float,
+) -> List[Dict[str, Any]]:
+    """cross_document / comparison intent: top chunks from each side.
+
+    Reserves an even quota per target doc type (or per source if no
+    target_doc_types), then fills with global top-k.
+    """
+    query_embedding = _embed_query_once(vs, query)
+    selected: List[Dict[str, Any]] = []
+    seen = set()
+
+    units: List[Dict[str, str]] = []  # [{"kind": "doc_type"|"source", "value": ...}]
+    if target_doc_types:
+        for dt in target_doc_types:
+            units.append({"kind": "doc_type", "value": dt})
+    else:
+        for s in sources:
+            units.append({"kind": "source", "value": s})
+
+    if not units:
+        raw = _similarity_search_by_vector(vs, query_embedding, query, k=k)
+        return _chunks_from_raw(raw, min_relevance=min_relevance)
+
+    per_unit = max(1, k // len(units))
+    for unit in units:
+        kw = {"doc_type": unit["value"]} if unit["kind"] == "doc_type" else {"source": unit["value"]}
+        # Use a direct filter (we can't pass kwargs to similarity_search by vector)
+        if unit["kind"] == "doc_type":
+            raw = _similarity_search_by_vector(
+                vs, query_embedding, query, k=per_unit + 1, doc_type=unit["value"]
+            )
+        else:
+            raw = _similarity_search_by_vector(
+                vs, query_embedding, query, k=per_unit + 1, source=unit["value"]
+            )
+        for chunk in _chunks_from_raw(raw, min_relevance=None)[:per_unit]:
+            key = _chunk_identity(chunk)
+            if key in seen:
+                continue
+            chunk["retrieval_strategy"] = f"balanced_{unit['kind']}"
+            selected.append(chunk)
+            seen.add(key)
+
+    selected.sort(key=lambda c: c.get("relevance_score", 0.0), reverse=True)
+
+    # Fill remaining slots from global top-k
+    target_total = k
+    raw_global = _similarity_search_by_vector(vs, query_embedding, query, k=target_total * 3)
+    for chunk in _chunks_from_raw(raw_global, min_relevance=min_relevance):
+        key = _chunk_identity(chunk)
+        if key in seen:
+            continue
+        chunk["retrieval_strategy"] = "balanced_fill"
+        selected.append(chunk)
+        seen.add(key)
+        if len(selected) >= target_total:
+            break
+
+    return selected[:k]
+
+
+def _retrieve_corpus_overview(
+    vs: Any,
+    query: str,
+    *,
+    k: int,
+    sources: Sequence[str],
+    min_relevance: float,
+) -> List[Dict[str, Any]]:
+    """corpus_summary intent: one chunk from each source, then global fill."""
+    query_embedding = _embed_query_once(vs, query)
+    selected: List[Dict[str, Any]] = []
+    seen = set()
+
+    for source in sources:
+        raw = _similarity_search_by_vector(
+            vs, query_embedding, query, k=3, source=source
+        )
+        for chunk in _chunks_from_raw(raw, min_relevance=None)[:1]:
+            key = _chunk_identity(chunk)
+            if key in seen:
+                continue
+            chunk["retrieval_strategy"] = "corpus_overview_per_source"
+            selected.append(chunk)
+            seen.add(key)
+
+    selected.sort(key=lambda c: c.get("relevance_score", 0.0), reverse=True)
+
+    target_total = max(k, len(sources))
+    raw_global = _similarity_search_by_vector(vs, query_embedding, query, k=target_total * 3)
+    for chunk in _chunks_from_raw(raw_global, min_relevance=min_relevance):
+        key = _chunk_identity(chunk)
+        if key in seen:
+            continue
+        chunk["retrieval_strategy"] = "corpus_overview_fill"
+        selected.append(chunk)
+        seen.add(key)
+        if len(selected) >= target_total:
+            break
+
+    return selected[:max(k, len(sources))]
+
+
+# --------------------------------------------------------------------------- #
+# Main entry point
+# --------------------------------------------------------------------------- #
+
+def retrieve(
+    query: str,
+    k: int = DEFAULT_K,
+    intent: str = "single_document",
+    target_doc_types: Optional[Sequence[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Return chunks for the query using an intent-aware strategy.
+
+    `intent` is one of: single_document, cross_document, comparison,
+    corpus_summary. `target_doc_types` is the list of doc types the
+    query is asking about (e.g. ["resume"], ["resume", "policy"]).
+    Empty list = no specific target — let the strategy fall back to
+    global similarity.
+    """
+    vs = _get_vectorstore()
+    min_rel = _min_relevance()
+    sources = _get_indexed_sources(vs)
+    target_doc_types = list(target_doc_types or [])
+
+    if not sources:
+        return []
+
+    if intent == "corpus_summary":
+        chunks = _retrieve_corpus_overview(
+            vs, query, k=k, sources=sources, min_relevance=min_rel
+        )
+    elif intent in ("cross_document", "comparison"):
+        chunks = _retrieve_balanced(
+            vs, query, k=k, target_doc_types=target_doc_types,
+            sources=sources, min_relevance=min_rel,
+        )
+    else:  # single_document
+        chunks = _retrieve_targeted(
+            vs, query, k=k, target_doc_types=target_doc_types,
+            sources=sources, min_relevance=min_rel,
         )
 
-    log.info("Retrieved %d chunk(s) for query: %r", len(chunks), query)
+    # Single-source failure flagging
+    if len(sources) > 1:
+        result_sources = {c.get("source") for c in chunks}
+        if len(result_sources) == 1 and chunks:
+            log.warning(
+                "Source diversity failed: %d chunks all from %s (out of %d sources).",
+                len(chunks), next(iter(result_sources), "?"), len(sources),
+            )
+            for c in chunks:
+                c["_diversity_flag"] = "SINGLE_SOURCE_RETRIEVAL"
+
+    log.info(
+        "Retrieved %d chunk(s) for intent=%s targets=%s query=%r",
+        len(chunks), intent, target_doc_types, query,
+    )
     for c in chunks:
         log.info(
-            "  - %s (page %d) score=%.4f distance=%.4f",
-            c["source"], c["page"], c["relevance_score"], c["_distance"],
+            "  - %s [%s] p.%d score=%.4f strategy=%s",
+            c["source"], c.get("doc_type", "?"), c["page"],
+            c["relevance_score"], c.get("retrieval_strategy", "?"),
         )
     return chunks
 
 
 def get_corpus_size() -> int:
-    """Return the number of chunks in the active ChromaDB collection.
-
-    Returns 0 when the collection does not exist yet (no documents ingested)
-    or when the read fails for any reason. Used by the input guardrail to
-    block queries when the corpus is empty.
-    """
     try:
         vs = _get_vectorstore()
         return int(vs._collection.count() or 0)
@@ -195,3 +572,12 @@ def get_corpus_size() -> int:
     except Exception as e:
         log.warning("Could not read corpus size: %s", e)
         return 0
+
+
+def get_indexed_doc_types() -> List[str]:
+    """Public helper for the UI / orchestrator."""
+    try:
+        vs = _get_vectorstore()
+        return _get_indexed_doc_types(vs)
+    except Exception:
+        return []

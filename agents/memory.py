@@ -1,17 +1,18 @@
-"""MemoryAgent — session-level conversation context for multi-turn Q&A.
+"""MemoryAgent — conversation context for multi-turn Q&A.
 
 Satisfies Official US 2 (Distinct agents for retrieval, reasoning,
 validation, AND memory) and Story 5 of agents.md.
 
-Stores a per-session history of queries, answers, and the sources cited
-in each turn. `get_context()` formats the most recent N turns as a
+Stores a history of queries, answers, and the sources cited in each
+turn. `get_context()` formats the most recent N turns as a
 human-readable block that the OrchestratorAgent injects into its
-planning prompt so multi-turn conversations can reference prior context
-("how does that compare to the policy you mentioned earlier?").
+planning prompt so multi-turn conversations can reference prior
+context ("how does that compare to the policy you mentioned
+earlier?").
 
-The agent is a single in-process instance per session; on a fresh
-session call `reset()` to start over. The class deliberately does NOT
-persist to disk — it is conversation-scoped, not document-scoped.
+The agent is a single in-process instance; on a fresh start call
+`reset()`. The class deliberately does NOT persist to disk — it
+is conversation-scoped, not document-scoped.
 
 Public API:
     MemoryAgent(session_id="default")
@@ -19,9 +20,14 @@ Public API:
         .get_context(last_n=3) -> str
         .reset() -> None
         .history -> List[dict]  (read-only view)
+        session_id : str        (kept for backward compat + log trace)
 
-The in-memory dict is stored on the instance, not a global. To share
-across LangGraph nodes, pass the instance through `AgentState["memory"]`.
+The in-memory dict is stored on the instance. To share across
+LangGraph nodes, pass the instance through `AgentState["memory"]`.
+
+`session_id` is optional in the new single-corpus design (no
+per-session collections anymore); it is preserved as an attribute
+on the instance so existing tests and audit logs keep working.
 """
 
 from __future__ import annotations
@@ -37,18 +43,35 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-class MemoryAgent:
-    """Per-session conversation memory.
+_DEFAULT_MEMORY: Optional["MemoryAgent"] = None
 
-    A single instance holds the history for one session. The class is
-    intentionally minimal — it does not perform any LLM calls, summarization,
-    or persistence. The Orchestrator consumes `get_context()` directly
+
+def get_default_memory() -> "MemoryAgent":
+    """Return a process-wide singleton MemoryAgent.
+
+    In the single-corpus design there are no per-session ChromaDB
+    collections, so a single memory instance is shared across all UI
+    tabs / re-runs. `reset_knowledge_base()` in the UI calls
+    `reset()` on this instance.
+    """
+    global _DEFAULT_MEMORY
+    if _DEFAULT_MEMORY is None:
+        _DEFAULT_MEMORY = MemoryAgent()
+    return _DEFAULT_MEMORY
+
+
+class MemoryAgent:
+    """Conversation memory for multi-turn Q&A.
+
+    A single instance holds the history. The class is intentionally
+    minimal — it does not perform any LLM calls, summarization, or
+    persistence. The Orchestrator consumes `get_context()` directly
     to inform planning; downstream agents (retriever, analyst, verifier)
     read prior context from `AgentState` if needed.
     """
 
-    def __init__(self, session_id: str = "default") -> None:
-        self.session_id = session_id
+    def __init__(self, session_id: Optional[str] = None) -> None:
+        self.session_id = session_id or "default"
         self._history: List[Dict[str, Any]] = []
 
     @property

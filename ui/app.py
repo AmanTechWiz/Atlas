@@ -1,40 +1,31 @@
 """Streamlit UI for the Enterprise Knowledge Ops Agent.
 
-Wired to the real `graph.workflow.run_query` (Official US 1+2+3+4+5+6).
+Dark-mode chat interface (ChatGPT/Claude-inspired):
 
-Per-session behavior:
-- Each browser session gets a fresh `session_id` (UUID4).
-- Each session has its OWN ChromaDB collection (named `session_<id>`,
-  persisted to `chroma_db_sessions/<id>/`).
-- Each session has its OWN MemoryAgent (multi-turn conversations are
-  isolated across sessions).
-- "Reset Session" deletes the session's collection, regenerates the
-  session_id, and clears all in-memory state.
+  - Top bar: app title + backend model + Reset Knowledge Base button
+  - Sidebar: file upload + corpus stats (collapsible)
+  - Main: when empty, centered hero with inline upload dropzone
+         when chat exists, scrollable message history using `st.chat_message`
+  - Each assistant turn shows: answer, confidence badge, source chips,
+    and a collapsible Details panel (plan, retrieved chunks, eval log path)
+  - Sticky chat input at the bottom using `st.chat_input`
 
-File upload:
-- `st.file_uploader` accepts multiple PDF / DOCX / TXT / MD files.
-- Uploaded files are written to a per-session temp dir, ingested into
-  the session's collection, then the temp dir is cleaned up.
-- The user can re-upload to replace the session's corpus.
+Wired to real `graph.workflow.run_query` (US 1+2+3+4+5+6).
 
-Corpus-agnostic:
-- No hardcoded sample docs. The system starts with an empty corpus.
-- The input guardrail blocks queries until at least one document is
-  uploaded (per US 5 governance).
+Single application-level corpus (`chroma_db/atlas_corpus`). There are
+no per-session collections; one MemoryAgent is shared across re-runs.
+The "Reset Knowledge Base" button clears the corpus, the conversation
+history, the memory, and the LangGraph state in one action.
 """
 
 from __future__ import annotations
 
-import json
-import logging
 import os
 import shutil
 import tempfile
-import uuid
 import warnings
-from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -45,45 +36,36 @@ warnings.filterwarnings(
     category=DeprecationWarning,
 )
 
-load_dotenv(dotenv_path=str(Path(__file__).resolve().parent.parent / ".env"), override=True)
+load_dotenv(
+    dotenv_path=str(Path(__file__).resolve().parent.parent / ".env"),
+    override=True,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SESSIONS_DIR = PROJECT_ROOT / "chroma_db_sessions"
+PERSIST_DIR = PROJECT_ROOT / "chroma_db"
+COLLECTION_NAME = "atlas_corpus"
 LOGS_DIR = PROJECT_ROOT / "logs"
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
-log = logging.getLogger("ui")
-
-STUB_ENABLED = False
+PERSIST_DIR.mkdir(parents=True, exist_ok=True)
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 try:
     from graph.workflow import run_query as _run_query
-    from agents.memory import MemoryAgent
-    from agents.retriever import (
-        get_active_collection_name,
-        get_active_persist_dir,
-        get_corpus_size,
-        set_active_collection,
-    )
-    from vector_store.ingest import add_files_to_collection, safe_ingest_files
+    from agents.memory import MemoryAgent, get_default_memory
+    from agents.retriever import get_corpus_size, get_indexed_doc_types
+    from vector_store.ingest import ingest_files, reset_collection
 except Exception as _e:  # pragma: no cover
     _run_query = None
     MemoryAgent = None
-    get_active_collection_name = None
-    get_active_persist_dir = None
+    get_default_memory = None
     get_corpus_size = None
-    set_active_collection = None
-    add_files_to_collection = None
-    safe_ingest_files = None
+    get_indexed_doc_types = None
+    ingest_files = None
+    reset_collection = None
     _IMPORT_ERROR = repr(_e)
 else:
     _IMPORT_ERROR = None
 
 UPLOAD_TYPES = ["pdf", "docx", "txt", "md"]
-MAX_UPLOAD_MB = 25
 
 SAMPLE_QUERIES = [
     "Summarize the key points across the uploaded documents.",
@@ -92,475 +74,614 @@ SAMPLE_QUERIES = [
 ]
 
 
-def stub_run_query(query: str) -> dict[str, Any]:
-    return {
-        "query": query,
-        "plan": ["[RETRIEVE] (stub)", "[ANALYZE] (stub)", "[VERIFY] (stub)"],
-        "retrieved_chunks": [],
-        "draft_answer": "(stub answer)",
-        "verification_result": {"confidence": 0.0, "grounded": False, "flags": ["STUB"]},
-        "final_answer": "Stub mode is enabled. Set STUB_ENABLED=False to use the real backend.",
-        "decision_trace": ["STUB: stub_run_query called"],
-        "session_history": [],
-        "error": "stub_mode",
-        "api_error": None,
-        "needs_disclaimer": False,
-    }
+# --------------------------------------------------------------------------- #
+# Dark theme CSS
+# --------------------------------------------------------------------------- #
+
+def _inject_css() -> None:
+    st.markdown(
+        """
+        <style>
+        :root {
+            --bg-0: #0f1014;
+            --bg-1: #161821;
+            --bg-2: #1d1f2b;
+            --bg-3: #252836;
+            --line: #2a2d3a;
+            --text-0: #e7e9ee;
+            --text-1: #a0a4b0;
+            --text-2: #6b6f7c;
+            --accent: #8b5cf6;
+            --accent-soft: rgba(139, 92, 246, 0.15);
+            --high: #22c55e;
+            --med:  #eab308;
+            --low:  #ef4444;
+            --danger: #ef4444;
+        }
+
+        .stApp, .main, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
+            background: var(--bg-0) !important;
+            color: var(--text-0) !important;
+        }
+        [data-testid="stToolbar"] { background: transparent !important; }
+
+        #MainMenu, footer, .viewerBadge_link__qRIco, [data-testid="stDecoration"] {
+            display: none !important;
+        }
+
+        .atlas-top {
+            position: sticky; top: 0; z-index: 100;
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 12px 24px;
+            background: rgba(15, 16, 20, 0.85);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            border-bottom: 1px solid var(--line);
+        }
+        .atlas-brand { display: flex; align-items: center; gap: 10px; }
+        .atlas-logo {
+            width: 30px; height: 30px; border-radius: 8px;
+            background: linear-gradient(135deg, #8b5cf6, #6366f1);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 16px; box-shadow: 0 2px 10px rgba(139, 92, 246, 0.3);
+        }
+        .atlas-title { font-size: 1.05rem; font-weight: 600; color: var(--text-0); line-height: 1.2; }
+        .atlas-sub { font-size: 0.72rem; color: var(--text-1); margin-top: 1px; }
+
+        .atlas-meta { display: flex; align-items: center; gap: 16px; color: var(--text-1); font-size: 0.78rem; }
+        .atlas-meta .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--high); display: inline-block; margin-right: 6px; }
+
+        .main .block-container { max-width: 820px; padding-top: 1rem; padding-bottom: 160px; }
+
+        .hero {
+            text-align: center; padding: 64px 16px 24px;
+        }
+        .hero .big {
+            font-size: 2.4rem; font-weight: 700; color: var(--text-0);
+            margin: 0 0 8px 0; letter-spacing: -0.02em;
+        }
+        .hero .sub { color: var(--text-1); font-size: 0.95rem; margin-bottom: 32px; }
+        .hero .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; max-width: 560px; margin: 0 auto; }
+        .hero .chip {
+            background: var(--bg-1); border: 1px solid var(--line);
+            border-radius: 12px; padding: 14px 16px; text-align: left;
+            color: var(--text-0); font-size: 0.86rem; cursor: pointer;
+            transition: background 0.15s, border-color 0.15s, transform 0.15s;
+        }
+        .hero .chip:hover { background: var(--bg-2); border-color: var(--accent); }
+        .hero .chip .lbl { color: var(--text-1); font-size: 0.72rem; margin-top: 4px; display: block; }
+        .hero .upload-cta {
+            margin-top: 24px; padding: 22px; border: 1.5px dashed var(--line);
+            border-radius: 14px; background: var(--bg-1);
+        }
+        .hero .upload-cta .ic { font-size: 28px; margin-bottom: 6px; }
+        .hero .upload-cta .tx { color: var(--text-0); font-weight: 500; }
+        .hero .upload-cta .sm { color: var(--text-1); font-size: 0.78rem; margin-top: 4px; }
+
+        [data-testid="stChatMessage"] {
+            background: transparent !important;
+            border: 0 !important;
+            padding: 14px 0 !important;
+        }
+        [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] p {
+            color: var(--text-0) !important; line-height: 1.6; font-size: 0.95rem;
+        }
+        [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] code {
+            background: var(--bg-2) !important; color: #f0abfc !important; border: 0 !important;
+        }
+        [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] pre {
+            background: var(--bg-1) !important; border: 1px solid var(--line) !important;
+        }
+        [data-testid="stChatMessageContent"] {
+            background: transparent !important;
+        }
+
+        .badge {
+            display: inline-block; padding: 2px 9px; border-radius: 999px;
+            font-size: 0.7rem; font-weight: 600; letter-spacing: 0.01em;
+        }
+        .badge-high { background: rgba(34, 197, 94, 0.15); color: #4ade80; }
+        .badge-med  { background: rgba(234, 179, 8, 0.15); color: #facc15; }
+        .badge-low  { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+        .badge-na   { background: var(--bg-3); color: var(--text-1); }
+
+        .src-wrap { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+        .src-lbl { color: var(--text-2); font-size: 0.72rem; }
+        .src-chip {
+            display: inline-flex; align-items: center; gap: 4px;
+            background: var(--bg-2); border: 1px solid var(--line);
+            color: var(--text-0); padding: 2px 9px; border-radius: 999px;
+            font-size: 0.72rem;
+        }
+        .src-chip .p { color: var(--text-2); font-size: 0.7rem; }
+        .src-chip.empty { color: var(--text-2); }
+
+        details.atlas-details {
+            margin-top: 10px; background: var(--bg-1);
+            border: 1px solid var(--line); border-radius: 10px; padding: 0;
+        }
+        details.atlas-details > summary {
+            list-style: none; cursor: pointer; padding: 9px 14px;
+            color: var(--text-1); font-size: 0.8rem; user-select: none;
+        }
+        details.atlas-details > summary::-webkit-details-marker { display: none; }
+        details.atlas-details[open] > summary { color: var(--text-0); border-bottom: 1px solid var(--line); }
+        details.atlas-details .body { padding: 12px 14px; }
+        details.atlas-details .body h5 { color: var(--text-1); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; margin: 12px 0 6px; }
+        details.atlas-details .body .chunk { padding: 8px 10px; background: var(--bg-2); border-radius: 8px; margin: 6px 0; font-size: 0.82rem; }
+        details.atlas-details .body .chunk .meta { color: var(--text-2); font-size: 0.72rem; margin-bottom: 4px; }
+        details.atlas-details .body .chunk .txt { color: var(--text-0); }
+
+        [data-testid="stSidebar"] { background: var(--bg-1) !important; border-right: 1px solid var(--line) !important; }
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p { color: var(--text-0) !important; }
+        [data-testid="stSidebar"] label, [data-testid="stSidebar"] .stCaption { color: var(--text-1) !important; }
+        [data-testid="stSidebarNav"] { display: none; }
+
+        [data-testid="stChatInput"] textarea, [data-testid="stChatInput"] > div {
+            background: var(--bg-2) !important;
+            color: var(--text-0) !important;
+            border: 1px solid var(--line) !important;
+        }
+        [data-testid="stChatInput"] textarea::placeholder { color: var(--text-2) !important; }
+
+        .stButton > button {
+            background: var(--bg-2) !important; color: var(--text-0) !important;
+            border: 1px solid var(--line) !important; border-radius: 8px !important;
+            transition: all 0.15s;
+        }
+        .stButton > button:hover { background: var(--bg-3) !important; border-color: var(--accent) !important; }
+        .stButton > button[kind="primary"] {
+            background: var(--accent) !important; border-color: var(--accent) !important; color: white !important;
+        }
+        .stButton > button[kind="primary"]:hover { background: #7c3aed !important; }
+        .stButton > button.reset-kb {
+            background: rgba(239, 68, 68, 0.10) !important;
+            color: #f87171 !important;
+            border: 1px solid rgba(239, 68, 68, 0.4) !important;
+            font-weight: 600 !important;
+        }
+        .stButton > button.reset-kb:hover {
+            background: rgba(239, 68, 68, 0.20) !important;
+            border-color: var(--danger) !important;
+        }
+
+        [data-testid="stFileUploaderDropzone"] {
+            background: var(--bg-2) !important; border: 1.5px dashed var(--line) !important; border-radius: 10px !important;
+        }
+        [data-testid="stFileUploaderDropzone"]:hover { border-color: var(--accent) !important; }
+        [data-testid="stFileUploaderDropzone"] * { color: var(--text-1) !important; }
+
+        [data-testid="stMetric"] { background: var(--bg-2); padding: 8px 12px; border-radius: 8px; border: 1px solid var(--line); }
+        [data-testid="stMetricLabel"] { color: var(--text-1) !important; }
+        [data-testid="stMetricValue"] { color: var(--text-0) !important; }
+
+        .atlas-code {
+            background: var(--bg-2); border: 1px solid var(--line);
+            border-radius: 8px; padding: 8px 12px;
+            color: var(--text-0); font-size: 0.82rem;
+            font-family: ui-monospace, SFMono-Regular, monospace;
+        }
+
+        ::-webkit-scrollbar { width: 10px; height: 10px; }
+        ::-webkit-scrollbar-track { background: var(--bg-0); }
+        ::-webkit-scrollbar-thumb { background: var(--bg-3); border-radius: 5px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--line); }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
-def _new_session_id() -> str:
-    return uuid.uuid4().hex[:12]
+# --------------------------------------------------------------------------- #
+# Session state
+# --------------------------------------------------------------------------- #
 
-
-def _session_persist_dir(session_id: str) -> Path:
-    return SESSIONS_DIR / f"session_{session_id}"
-
-
-def _session_collection_name(session_id: str) -> str:
-    return f"session_{session_id}"
-
-
-def _ensure_session_active() -> None:
-    """Make sure `st.session_state.session_id` is set AND the retriever
-    is pointed at this session's collection. Called on every render."""
-    if not st.session_state.get("session_id"):
-        st.session_state.session_id = _new_session_id()
-        st.session_state.memory = MemoryAgent(st.session_state.session_id) if MemoryAgent else None
-        st.session_state.uploaded_filenames = []
-        st.session_state.corpus_size_at_start = 0
-        st.session_state.ingest_message = ""
-
-    if set_active_collection is not None:
-        sid = st.session_state.session_id
-        target_dir = _session_persist_dir(sid)
-        target_coll = _session_collection_name(sid)
-        if get_active_collection_name() != target_coll:
-            set_active_collection(target_coll, persist_dir=target_dir)
-            log.info("UI bound to session=%s collection=%s", sid, target_coll)
-
-
-def reset_session() -> None:
-    """Delete the session's collection, generate a new session_id, clear state."""
-    if (
-        set_active_collection is not None
-        and get_active_collection_name is not None
-        and get_active_persist_dir is not None
-    ):
-        try:
-            from vector_store.ingest import delete_collection
-            delete_collection(
-                get_active_persist_dir(),
-                get_active_collection_name(),
-            )
-        except Exception as e:
-            log.warning("Reset: could not delete collection cleanly: %s", e)
-    st.session_state.session_id = _new_session_id()
-    st.session_state.memory = MemoryAgent(st.session_state.session_id) if MemoryAgent else None
-    st.session_state.uploaded_filenames = []
-    st.session_state.ingest_message = ""
-    st.session_state.corpus_size_at_start = 0
-    st.session_state.messages = []
-    st.session_state.session_history = []
-    st.session_state.last_result = None
-    if set_active_collection is not None:
-        set_active_collection(
-            _session_collection_name(st.session_state.session_id),
-            persist_dir=_session_persist_dir(st.session_state.session_id),
+def _ensure_session_state() -> None:
+    if "memory" not in st.session_state or st.session_state.memory is None:
+        st.session_state.memory = (
+            get_default_memory() if get_default_memory is not None else None
         )
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    if "uploaded_filenames" not in st.session_state:
+        st.session_state.uploaded_filenames = []
+    if "uploader_key" not in st.session_state:
+        st.session_state.uploader_key = 0
+    if "confirming_reset" not in st.session_state:
+        st.session_state.confirming_reset = False
 
 
-def _ingest_files_into_session(uploaded_files) -> tuple[bool, str]:
-    """Write uploaded files to a per-session temp dir, ingest them into
-    the session's collection, then clean up the temp dir. Returns
-    (success, message).
+def _corpus_size() -> int:
+    if get_corpus_size is None:
+        return 0
+    try:
+        return int(get_corpus_size() or 0)
+    except Exception:
+        return 0
 
-    Uses `add_files_to_collection` so existing chunks are preserved
-    when the user uploads additional files. After a successful ingest
-    the Retriever's cached vectorstore is invalidated so the next
-    query picks up the new data.
+
+def _indexed_doc_types() -> List[str]:
+    if get_indexed_doc_types is None:
+        return []
+    try:
+        return list(get_indexed_doc_types() or [])
+    except Exception:
+        return []
+
+
+def reset_knowledge_base() -> None:
+    """Wipe the entire knowledge base: corpus + memory + chat history.
+
+    Called by the prominent "Reset Knowledge Base" button in the
+    sidebar. The user is asked to confirm before the wipe happens.
     """
-    if not uploaded_files or add_files_to_collection is None:
+    if reset_collection is not None:
+        try:
+            reset_collection(PERSIST_DIR, COLLECTION_NAME)
+        except Exception:
+            pass
+    from agents.retriever import invalidate_cache
+    try:
+        invalidate_cache()
+    except Exception:
+        pass
+    memory = st.session_state.get("memory")
+    if memory is not None:
+        memory.reset()
+    st.session_state.messages = []
+    st.session_state.uploaded_filenames = []
+    st.session_state.uploader_key += 1
+    st.session_state.confirming_reset = False
+
+
+def _ingest_files(uploaded_files) -> tuple[bool, str]:
+    if not uploaded_files or ingest_files is None:
         return False, "No files uploaded or ingest module unavailable."
 
-    sid = st.session_state.session_id
-    persist_dir = _session_persist_dir(sid)
-    collection_name = _session_collection_name(sid)
-    persist_dir.mkdir(parents=True, exist_ok=True)
-
-    tmp_dir = Path(tempfile.mkdtemp(prefix=f"atlas_upload_{sid}_"))
-    saved_paths: list[Path] = []
+    tmp_dir = Path(tempfile.mkdtemp(prefix="atlas_upload_"))
+    saved_paths: List[Path] = []
     try:
-        for uf in uploaded_files:
-            safe_name = Path(uf.name).name
-            target = tmp_dir / safe_name
+        for uploaded in uploaded_files:
+            target = tmp_dir / uploaded.name
             with open(target, "wb") as f:
-                f.write(uf.getbuffer().tobytes())
+                f.write(uploaded.getbuffer())
             saved_paths.append(target)
 
         backend = os.getenv("EMBEDDING_BACKEND", "ollama").lower()
-        n = add_files_to_collection(saved_paths, persist_dir, collection_name, backend)
+        n = ingest_files(saved_paths, PERSIST_DIR, COLLECTION_NAME, backend)
+
+        from agents.retriever import invalidate_cache
+        try:
+            invalidate_cache()
+        except Exception:
+            pass
 
         existing = set(st.session_state.uploaded_filenames or [])
         new = {p.name for p in saved_paths}
         st.session_state.uploaded_filenames = sorted(existing | new)
 
-        if set_active_collection is not None:
-            set_active_collection(collection_name, persist_dir=persist_dir)
-
-        total = get_corpus_size() if get_corpus_size is not None else n
-        return True, (
-            f"Added {n} new chunk(s) from {len(saved_paths)} file(s). "
-            f"Corpus now has {total} chunk(s)."
-        )
+        total = _corpus_size()
+        return True, f"Indexed {n} new chunk(s) from {len(saved_paths)} file(s). Corpus now {total}."
     except FileNotFoundError as e:
-        return False, f"Ingest failed — unsupported file type: {e}"
+        return False, f"Unsupported file type: {e}"
     except Exception as e:
-        log.exception("Ingest failed")
         return False, f"Ingest failed: {e}"
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-def render_answer_tab(result: dict[str, Any]) -> None:
-    v = result.get("verification_result") or {}
-    confidence = float(v.get("confidence", 0.0) or 0.0)
-    grounded = bool(v.get("grounded", False))
-    flags = v.get("flags", []) or []
-    api_error = result.get("api_error")
-    error = result.get("error") or ""
-    guardrail_rejected = error.startswith("guardrail_rejected")
+# --------------------------------------------------------------------------- #
+# Rendering helpers
+# --------------------------------------------------------------------------- #
 
-    if guardrail_rejected:
-        reason = error.split("guardrail_rejected: ", 1)[-1]
-        st.error(f"**Input guardrail rejected this query** — {reason}")
-        st.caption("The pipeline did not run. Rephrase the query and try again.")
-    elif api_error:
-        st.error(f"**Service unavailable** — {api_error}")
-        st.caption("The Agent Trace tab shows which stage failed. The low-confidence "
-                   "banner is suppressed because the cause is an upstream API failure, "
-                   "not a weak retrieval.")
-    elif confidence < 0.6:
-        st.error(
-            f"**Low confidence** ({confidence:.2f}) — the answer may not be fully supported "
-            f"by the retrieved source documents. Treat it as provisional and verify against "
-            f"the cited sources before acting on it."
-        )
-    elif not grounded:
-        st.warning(
-            f"**Not grounded** ({confidence:.2f}) — the Verifier flagged issues with the answer. "
-            f"See the Agent Trace tab for details."
-        )
-
-    if not api_error and not guardrail_rejected:
-        st.markdown(confidence_badge(confidence), unsafe_allow_html=True)
-    st.markdown("### Final Answer")
-    st.markdown(result["final_answer"])
-
-    if result["retrieved_chunks"]:
-        unique_sources = sorted({c["source"] for c in result["retrieved_chunks"]})
-        st.markdown(
-            "**Sources:** " + " · ".join(f"`{s}`" for s in unique_sources)
-        )
-
-    if flags:
-        with st.expander(f"Verifier flags ({len(flags)})"):
-            for f in flags:
-                st.markdown(f"- `{f}`")
-
-
-def _score_badge_html(label: str, value: float) -> str:
-    if value >= 0.7:
-        color, band = "#1f9d55", "HIGH"
-    elif value >= 0.5:
-        color, band = "#b08800", "MEDIUM"
-    else:
-        color, band = "#c0392b", "LOW"
-    return (
-        f'<span style="background:{color};color:white;padding:3px 9px;'
-        f'border-radius:10px;font-weight:600;font-size:0.8em;margin-right:6px;">'
-        f"{label}: {value:.2f} ({band})</span>"
-    )
-
-
-def render_agent_trace_tab(result: dict[str, Any]) -> None:
-    st.markdown("### Orchestrator Plan")
-    for i, step in enumerate(result["plan"], 1):
-        st.markdown(f"**{i}.** {step}")
-
-    st.markdown("### Decision Trace")
-    for line in result["decision_trace"]:
-        st.code(line, language="text")
-
-    st.markdown("### Retriever Detail")
-    st.markdown(f"**{len(result['retrieved_chunks'])}** chunk(s) retrieved.")
-    for i, c in enumerate(result["retrieved_chunks"], 1):
-        with st.expander(
-            f"Chunk {i} — {c['source']} (page {c['page']}) — relevance {c['relevance_score']:.2f}"
-        ):
-            st.write(c["text"])
-
-    st.markdown("### Analyst Draft")
-    with st.expander("Show draft answer (pre-verification)"):
-        st.text(result["draft_answer"])
-
-    st.markdown("### Verifier Result")
-    v = result["verification_result"]
-
-    if "grounding_confidence" in v:
-        cols = st.columns(3)
-        cols[0].markdown(
-            _score_badge_html("Grounding", float(v.get("grounding_confidence") or 0)),
-            unsafe_allow_html=True,
-        )
-        cols[1].markdown(
-            _score_badge_html("Answer Q.", float(v.get("answer_quality") or 0)),
-            unsafe_allow_html=True,
-        )
-        cols[2].markdown(
-            _score_badge_html("Retrieval", float(v.get("retrieval_confidence") or 0)),
-            unsafe_allow_html=True,
-        )
-
-    st.markdown(f"- **confidence:** {v.get('confidence')}")
-    st.markdown(f"- **grounded:** {v.get('grounded')}")
-    if v.get("flags"):
-        st.markdown(f"- **flags:** {', '.join(v['flags'])}")
-    claims = v.get("claims") or []
-    if claims:
-        with st.expander(f"Claims ({len(claims)})"):
-            for c in claims:
-                tag = c.get("support", "?")
-                st.markdown(f"- **[{tag}]** {c.get('claim', '')}")
-    aspects = v.get("question_aspects") or []
-    if aspects:
-        with st.expander(f"Question aspects ({len(aspects)})"):
-            for a in aspects:
-                st.markdown(f"- **[{a.get('status', '?')}]** {a.get('aspect', '')}")
-    with st.expander("Raw verification JSON"):
-        st.json(v)
-
-
-def render_sources_tab(result: dict[str, Any]) -> None:
-    chunks = result["retrieved_chunks"]
-    if not chunks:
-        st.info("No sources were retrieved for this query.")
-        return
-    unique_sources = sorted({c["source"] for c in chunks})
-    st.markdown(f"**{len(unique_sources)}** source file(s) cited, **{len(chunks)}** chunk(s) total.")
-    for src in unique_sources:
-        with st.expander(f"`{src}`"):
-            for i, c in enumerate([c for c in chunks if c["source"] == src], 1):
-                st.markdown(
-                    f"**Chunk {i}** (page {c['page']}, relevance {c['relevance_score']:.2f})"
-                )
-                st.write(c["text"])
-
-
-def render_eval_log_tab(result: dict[str, Any]) -> None:
-    log_path = result.get("log_path")
-    if not log_path or not Path(log_path).exists():
-        st.info("No evaluation log file was written for this query.")
-        return
+def _confidence_badge_html(confidence) -> str:
+    if confidence is None:
+        return '<span class="badge badge-na">no score</span>'
     try:
-        with open(log_path, "r", encoding="utf-8") as f:
-            entries = json.load(f)
-        st.markdown(f"**Log file:** `{log_path}`")
-        st.markdown(f"**Entries:** {len(entries)}")
-        for e in entries:
-            with st.expander(f"[{e['stage']}] {e['event']}  ·  {e['timestamp']}"):
-                st.json(e.get("data") or {})
-    except Exception as e:
-        st.error(f"Could not read log file: {e}")
-
-
-def confidence_badge(confidence: float) -> str:
-    if confidence >= 0.7:
-        color, label = "#1f9d55", "HIGH"
-    elif confidence >= 0.5:
-        color, label = "#b08800", "MEDIUM"
+        c = float(confidence)
+    except (TypeError, ValueError):
+        return '<span class="badge badge-na">no score</span>'
+    if c >= 0.7:
+        cls, label = "badge-high", "high"
+    elif c >= 0.5:
+        cls, label = "badge-med", "medium"
     else:
-        color, label = "#c0392b", "LOW"
-    return (
-        f'<span style="background:{color};color:white;padding:6px 14px;'
-        f'border-radius:12px;font-weight:600;font-size:0.85em;">'
-        f"Confidence: {confidence:.2f} ({label})</span>"
-    )
+        cls, label = "badge-low", "low"
+    return f'<span class="badge {cls}">confidence {c:.2f} · {label}</span>'
 
 
-def render_sidebar() -> None:
-    with st.sidebar:
-        st.markdown("## Atlas")
-        st.caption("Enterprise Knowledge Ops Agent")
+def _source_chips(sources: List[str]) -> str:
+    if not sources:
+        return '<span class="src-chip empty">no sources</span>'
+    chips = []
+    for s in sources:
+        if "::page::" in s:
+            src, page = s.split("::page::", 1)
+            chips.append(
+                f'<span class="src-chip">{src} <span class="p">· p.{page}</span></span>'
+            )
+        else:
+            chips.append(f'<span class="src-chip">{s}</span>')
+    return "".join(chips)
 
-        sid = st.session_state.get("session_id", "?")
-        st.markdown(f"**Session ID:** `{sid}`")
-        memory_obj = st.session_state.get("memory")
-        if memory_obj is not None:
-            st.markdown(f"**Conversation turns in memory:** {len(memory_obj)}")
-        corpus_size = 0
-        if get_corpus_size is not None:
+
+def _details_html(msg: Dict[str, Any]) -> str:
+    parts: List[str] = ['<details class="atlas-details"><summary>View details</summary><div class="body">']
+    intent = msg.get("intent")
+    targets = msg.get("target_doc_types") or []
+    if intent:
+        target_str = ", ".join(targets) if targets else "(none)"
+        parts.append(
+            f'<h5>Intent</h5><div class="atlas-code">{_escape(intent)} · targets=[{_escape(target_str)}]</div>'
+        )
+    original = msg.get("original_query")
+    rewritten = msg.get("search_query")
+    if rewritten and original and rewritten != original:
+        parts.append('<h5>Rewritten search query</h5>')
+        parts.append(f'<div class="atlas-code">{_escape(rewritten)}</div>')
+    plan = msg.get("plan") or []
+    if plan:
+        parts.append('<h5>Plan</h5><ol style="margin:0;padding-left:18px;color:var(--text-0);">')
+        for step in plan:
+            parts.append(f"<li>{_escape(step)}</li>")
+        parts.append("</ol>")
+    chunks = msg.get("retrieved_chunks") or []
+    if chunks:
+        parts.append(f'<h5>Retrieved chunks ({len(chunks)})</h5>')
+        for c in chunks:
+            src = _escape(str(c.get("source", "?")))
+            page = c.get("page", 0)
+            score = c.get("relevance_score", 0.0)
+            strategy = c.get("retrieval_strategy", "?")
+            doc_type = c.get("doc_type", "?")
             try:
-                corpus_size = get_corpus_size()
-            except Exception:
-                corpus_size = 0
-        st.markdown(f"**Chunks in corpus:** {corpus_size}")
-
-        st.markdown("### Model Info")
-        llm = os.getenv("GEMINI_MODEL", "not set")
-        backend = os.getenv("EMBEDDING_BACKEND", "not set").lower()
-        if backend == "ollama":
-            emb_display = f"Ollama (`{os.getenv('OLLAMA_EMBED_MODEL', 'nomic-embed-text')}`)"
-        elif backend == "gemini":
-            emb_display = f"Gemini (`{os.getenv('GEMINI_EMBEDDING_MODEL', 'models/gemini-embedding-001')}`)"
-        else:
-            emb_display = f"unknown backend `{backend}`"
-        st.markdown(f"- **LLM:** `{llm}`")
-        st.markdown(f"- **Embeddings:** {emb_display}")
-
-        st.markdown("### Upload Documents")
-        st.caption(
-            "Upload PDF, DOCX, TXT, or MD files. They are indexed into "
-            f"this session's private collection (max {MAX_UPLOAD_MB} MB per file)."
-        )
-        uploaded = st.file_uploader(
-            "Choose files",
-            type=UPLOAD_TYPES,
-            accept_multiple_files=True,
-            key=f"uploader_{sid}",
-        )
-        if uploaded and st.button("Index uploaded files", use_container_width=True):
-            with st.spinner(f"Embedding {len(uploaded)} file(s) into session collection..."):
-                ok, msg = _ingest_files_into_session(uploaded)
-            st.session_state.ingest_message = msg
-            st.toast(msg, icon="✅" if ok else "❌")
-            st.rerun()
-
-        if st.session_state.get("ingest_message"):
-            (st.success if corpus_size > 0 else st.error)(st.session_state.ingest_message)
-
-        if st.session_state.get("uploaded_filenames"):
-            st.markdown("**Indexed in this session:**")
-            for name in st.session_state.uploaded_filenames:
-                st.markdown(f"- `{name}`")
-
-        st.markdown("### Actions")
-        if st.button("Reset Session", use_container_width=True):
-            reset_session()
-            st.toast("Session reset — fresh session_id and empty corpus.", icon="🔄")
-            st.rerun()
-
-        st.markdown("### Session History")
-        if not st.session_state.session_history:
-            st.caption("No queries yet.")
-        else:
-            for i, entry in enumerate(reversed(st.session_state.session_history[-10:]), 1):
-                with st.expander(f"{i}. {entry['query'][:60]}{'…' if len(entry['query']) > 60 else ''}"):
-                    st.markdown(f"**Q:** {entry['query']}")
-                    st.markdown(f"**A:** {entry['answer'][:200]}{'…' if len(entry['answer']) > 200 else ''}")
-                    st.caption(f"Sources: {', '.join(entry.get('sources', []))}  ·  {entry['timestamp']}")
+                score_str = f"{float(score):.3f}"
+            except (TypeError, ValueError):
+                score_str = "0.000"
+            text = _escape((c.get("text") or "")[:280])
+            more = "..." if len(c.get("text") or "") > 280 else ""
+            parts.append(
+                f'<div class="chunk"><div class="meta">{src} · p.{page} · {doc_type} · '
+                f'score {score_str} · strategy {_escape(str(strategy))}</div>'
+                f'<div class="txt">{text}{more}</div></div>'
+            )
+    flags = (msg.get("verification") or {}).get("flags") or []
+    if flags:
+        parts.append('<h5>Flags</h5>')
+        for f in flags:
+            parts.append(f'<div class="atlas-code">{_escape(str(f))}</div>')
+    log_path = msg.get("log_path")
+    if log_path:
+        parts.append('<h5>Evaluation log</h5>')
+        parts.append(f'<div class="atlas-code">{_escape(log_path)}</div>')
+    parts.append("</div></details>")
+    return "".join(parts)
 
 
-def render_main() -> None:
-    st.title("Atlas — Enterprise Knowledge Ops Agent")
-    st.markdown(
-        "Upload your enterprise documents in the sidebar, then ask complex "
-        "questions across them. The answer is grounded in your uploaded "
-        "corpus and verified before being shown."
+def _escape(s: str) -> str:
+    return (
+        str(s)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
     )
 
-    if STUB_ENABLED or _IMPORT_ERROR:
-        msg = "UI shell is wired to **stubbed data**"
-        if STUB_ENABLED:
-            msg += " (STUB_ENABLED=True)"
-        if _IMPORT_ERROR:
-            msg += f" — backend import failed: `{_IMPORT_ERROR}`"
-        msg += ". The real backend will replace the stub when imports succeed."
-        st.warning(msg)
 
-    if not st.session_state.get("uploaded_filenames"):
-        st.info(
-            "**Getting started:** Use the **Upload Documents** panel in the sidebar "
-            "to add at least one PDF, DOCX, or TXT file. Once indexed, the guardrail "
-            "will allow queries and you can ask questions across the uploaded corpus."
-        )
-
-    st.markdown("### Try a sample query")
-    cols = st.columns(len(SAMPLE_QUERIES))
-    for col, sample in zip(cols, SAMPLE_QUERIES):
-        if col.button(
-            sample[:55] + ("…" if len(sample) > 55 else ""),
-            key=f"sample_{sample[:10]}_{st.session_state.session_id}",
-            use_container_width=True,
-        ):
-            st.session_state.query_input = sample
-
-    st.markdown("### Ask your own question")
-    st.text_input(
-        "Your query:",
-        key="query_input",
-        placeholder="e.g., Summarize the key points in the uploaded documents.",
-        label_visibility="collapsed",
-    )
-    ask = st.button("Ask", type="primary", use_container_width=False)
-
-    if ask and st.session_state.query_input.strip():
-        query = st.session_state.query_input
-        memory_obj = st.session_state.get("memory")
-        with st.spinner(
-            "Running agent pipeline (orchestrate → retrieve → analyze → verify → "
-            "finalize → memory)..."
-        ):
-            if STUB_ENABLED or _run_query is None:
-                result = stub_run_query(query)
-            else:
-                result = _run_query(query, memory=memory_obj)
-        st.session_state.last_result = result
-        st.session_state.messages.append({"role": "user", "content": query})
-        st.session_state.session_history.append(
-            {
-                "query": query,
-                "answer": result["final_answer"],
-                "sources": sorted({c["source"] for c in result["retrieved_chunks"]}),
-                "timestamp": datetime.now().strftime("%H:%M:%S"),
-            }
-        )
-
-    if st.session_state.last_result:
-        st.markdown("---")
-        tab1, tab2, tab3, tab4 = st.tabs(
-            ["📝 Answer", "🔍 Agent Trace", "📚 Sources", "📊 Evaluation Log"]
-        )
-        with tab1:
-            render_answer_tab(st.session_state.last_result)
-        with tab2:
-            render_agent_trace_tab(st.session_state.last_result)
-        with tab3:
-            render_sources_tab(st.session_state.last_result)
-        with tab4:
-            render_eval_log_tab(st.session_state.last_result)
-
+# --------------------------------------------------------------------------- #
+# Page
+# --------------------------------------------------------------------------- #
 
 def main() -> None:
     st.set_page_config(
-        page_title="Atlas — Enterprise Knowledge Ops",
-        page_icon="🧭",
-        layout="wide",
+        page_title="Atlas — Knowledge Ops",
+        page_icon="🧠",
+        layout="centered",
+        initial_sidebar_state="expanded",
+    )
+    _inject_css()
+    _ensure_session_state()
+
+    backend = os.getenv("EMBEDDING_BACKEND", "ollama")
+    model = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
+    corpus = _corpus_size()
+    mem_count = len(st.session_state.memory) if st.session_state.memory else 0
+    doc_types = _indexed_doc_types()
+
+    st.markdown(
+        f"""
+        <div class="atlas-top">
+            <div class="atlas-brand">
+                <div class="atlas-logo">🧠</div>
+                <div>
+                    <div class="atlas-title">Atlas</div>
+                    <div class="atlas-sub">Enterprise Knowledge Ops Agent</div>
+                </div>
+            </div>
+            <div class="atlas-meta">
+                <span><span class="dot"></span>{backend} · {model}</span>
+                <span>corpus: <b style="color:var(--text-0)">{corpus}</b> chunks</span>
+                <span>memory: <b style="color:var(--text-0)">{mem_count}</b> turns</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    defaults = {
-        "messages": [],
-        "last_result": None,
-        "session_history": [],
-        "query_input": "",
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
+    with st.sidebar:
+        st.markdown("### Knowledge base")
 
-    _ensure_session_active()
+        with st.expander("Upload documents", expanded=True):
+            uploaded = st.file_uploader(
+                "Drop PDFs / DOCX / TXT / MD",
+                type=UPLOAD_TYPES,
+                accept_multiple_files=True,
+                key=f"uploader_{st.session_state.uploader_key}",
+                label_visibility="collapsed",
+            )
+            if uploaded and st.button("Index uploaded files", type="primary", use_container_width=True):
+                with st.spinner("Embedding and indexing..."):
+                    ok, msg = _ingest_files(uploaded)
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+                st.rerun()
 
-    render_sidebar()
-    render_main()
+        if st.session_state.uploaded_filenames:
+            st.markdown("**Indexed files**")
+            for name in st.session_state.uploaded_filenames:
+                st.markdown(f"- `{name}`")
+        else:
+            st.caption("No files indexed yet.")
+
+        if doc_types:
+            st.caption(f"Detected document types: {', '.join(doc_types)}")
+
+        st.markdown("---")
+
+        if _IMPORT_ERROR:
+            st.error(f"Import error: {_IMPORT_ERROR}")
+        else:
+            st.success("Backend online", icon="🟢")
+
+        st.markdown("---")
+        st.markdown("### Danger zone")
+        if not st.session_state.confirming_reset:
+            st.button(
+                "Reset Knowledge Base",
+                key="reset_kb",
+                on_click=lambda: setattr(st.session_state, "confirming_reset", True),
+                use_container_width=True,
+            )
+        else:
+            st.warning(
+                "This will delete every indexed chunk, clear the conversation "
+                "history, and reset the memory. This cannot be undone."
+            )
+            c1, c2 = st.columns(2)
+            if c1.button("Yes, reset", type="primary", key="confirm_reset", use_container_width=True):
+                with st.spinner("Resetting..."):
+                    reset_knowledge_base()
+                st.success("Knowledge base reset.")
+                st.rerun()
+            if c2.button("Cancel", key="cancel_reset", use_container_width=True):
+                st.session_state.confirming_reset = False
+                st.rerun()
+
+    if not st.session_state.messages:
+        _render_welcome(corpus, uploaded_filenames=st.session_state.uploaded_filenames)
+    else:
+        for msg in st.session_state.messages:
+            _render_message(msg)
+
+    placeholder = (
+        "Ask anything about your documents…"
+        if corpus > 0
+        else "Upload a document in the sidebar to begin."
+    )
+    user_input = st.chat_input(placeholder)
+    if user_input and user_input.strip():
+        _run_turn(user_input.strip())
+
+
+def _render_welcome(corpus: int, uploaded_filenames: List[str]) -> None:
+    """Show centered hero with upload CTA + sample prompts when chat is empty."""
+    if corpus == 0 and not uploaded_filenames:
+        sub = "Upload a PDF, DOCX, or TXT to get started."
+    elif corpus == 0:
+        sub = "Files uploaded but not yet indexed — click 'Index uploaded files' in the sidebar."
+    else:
+        sub = f"Ready · {corpus} chunks indexed across {len(uploaded_filenames)} file(s)."
+
+    st.markdown(
+        f"""
+        <div class="hero">
+            <div class="big">How can I help you today?</div>
+            <div class="sub">{_escape(sub)}</div>
+            <div class="grid">
+                <div class="chip">📄 Summarize a document<div class="lbl">Get the key points fast</div></div>
+                <div class="chip">🔍 Find a specific clause<div class="lbl">Search contracts, policies, SOPs</div></div>
+                <div class="chip">⚖️ Compare requirements<div class="lbl">Side-by-side reasoning across docs</div></div>
+                <div class="chip">🧠 Multi-turn follow-ups<div class="lbl">Remembers the last 3 turns</div></div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    cols = st.columns(len(SAMPLE_QUERIES))
+    for col, sample in zip(cols, SAMPLE_QUERIES):
+        if col.button(sample, key=f"sample_{sample[:24]}"):
+            _run_turn(sample)
+
+
+def _render_message(msg: Dict[str, Any]) -> None:
+    role = msg.get("role", "assistant")
+    content = msg.get("content", "")
+    avatar = "🧑" if role == "user" else "🧠"
+    with st.chat_message(role, avatar=avatar):
+        st.markdown(content)
+        if role == "assistant":
+            confidence = msg.get("confidence")
+            sources = msg.get("sources") or []
+            st.markdown(
+                f'<div style="margin-top:6px">{_confidence_badge_html(confidence)}</div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f'<div class="src-wrap"><span class="src-lbl">sources:</span>{_source_chips(sources)}</div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(_details_html(msg), unsafe_allow_html=True)
+
+
+def _run_turn(user_text: str) -> None:
+    st.session_state.messages.append({"role": "user", "content": user_text})
+
+    if _run_query is None or st.session_state.memory is None:
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": f"**Backend unavailable.** {_IMPORT_ERROR or 'Unknown error'}",
+        })
+        st.rerun()
+        return
+
+    mem: MemoryAgent = st.session_state.memory
+    with st.spinner("Thinking…"):
+        result = _run_query(user_text, memory=mem)
+
+    plan = result.get("plan") or []
+    chunks = result.get("retrieved_chunks") or []
+    final = result.get("final_answer", "")
+    verification = result.get("verification_result") or {}
+    search_query = result.get("search_query")
+    log_path = result.get("log_path")
+    intent = result.get("intent")
+    target_doc_types = result.get("target_doc_types") or []
+
+    sources: List[str] = []
+    for c in chunks:
+        src = c.get("source", "")
+        page = c.get("page", 0)
+        if src:
+            sources.append(f"{src}::page::{page}" if page else src)
+    sources = sorted(set(sources))
+
+    st.session_state.messages.append({
+        "role": "assistant",
+        "content": final,
+        "confidence": verification.get("confidence"),
+        "sources": sources,
+        "plan": plan,
+        "intent": intent,
+        "target_doc_types": target_doc_types,
+        "search_query": search_query,
+        "original_query": user_text,
+        "retrieved_chunks": chunks,
+        "verification": verification,
+        "log_path": log_path,
+    })
+    st.rerun()
 
 
 if __name__ == "__main__":

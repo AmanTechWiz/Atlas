@@ -5,6 +5,7 @@ build/
 dist/
 wheels/
 *.egg-info
+.pytest_cache/
 
 # Virtual environments
 .venv
@@ -16,6 +17,7 @@ wheels/
 # ChromaDB persistent storage
 chroma_db/
 chroma/
+chroma_db_sessions/
 
 # Logs (generated at runtime, but keep folder tracked via .gitkeep)
 logs/*.json
@@ -27,4 +29,21 @@ logs/*.json
 .vscode/
 *.swp
 
-chroma_db_sessions/
+# Reference docs (kept locally only)
+agents.md
+progress.md
+EVERYTHING.md
+everything.md
+KnowledgeOps_Agent_Review_Doc.docx
+ref_doc.pdf
+
+# Debug / one-off scripts (kept locally only)
+scripts/repro_ui_upload.py
+scripts/migrate_corpus.py
+scripts/reingest_originals.py
+
+# Case-study reference files
+requirements.txt
+requirements-dev.txt
+docs/
+
